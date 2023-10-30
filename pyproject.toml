@@ -1,13 +1,16 @@
 [tool.poetry]
-name = "langserve"
+name = "gigaserve"
 version = "0.0.19"
 description = ""
 readme = "README.md"
-authors = ["LangChain"]
+authors = ["LangChain", "GigaChain"]
 license = "LangServe"
 repository = "https://github.com/langchain-ai/langserve"
 exclude = ["langserve/playground"]
 include = ["langserve/playground/dist/**/*"]
+packages = [
+    {include = "langserve"}
+]
 
 [tool.poetry.dependencies]
 python = "^3.8.1"
