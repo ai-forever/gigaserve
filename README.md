@@ -1,4 +1,4 @@
-# LangServe 🦜️🏓
+# GigaServe 🦜️🏓 = LangServe + GigaChat
 
 ## Overview
 
