@@ -2,7 +2,7 @@
 
 ## Overview
 
-`LangServe` helps developers deploy `LangChain` [runnables and chains](https://python.langchain.com/docs/expression_language/) as a REST API.
+`GigaServe = LangServe + GigaChain` helps developers deploy `GigaChain` [runnables and chains](https://python.langchain.com/docs/expression_language/) as a REST API.
 
 This library is integrated with [FastAPI](https://fastapi.tiangolo.com/) and uses [pydantic](https://docs.pydantic.dev/latest/) for data validation.
 
