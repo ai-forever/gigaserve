@@ -210,7 +210,7 @@ def _add_tracing_info_to_metadata(config: Dict[str, Any], request: Request) -> N
 
     info = {
         "__useragent": request.headers.get("user-agent"),
-        "__langserve_version": __version__,
+        "__gigaserve_version": __version__,
     }
     metadata.update(info)
     config["metadata"] = metadata

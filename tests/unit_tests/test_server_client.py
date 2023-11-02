@@ -867,7 +867,7 @@ async def test_input_validation(
         config_seen = server_runnable_spy.call_args[0][1]
         assert "metadata" in config_seen
         assert "__useragent" in config_seen["metadata"]
-        assert "__langserve_version" in config_seen["metadata"]
+        assert "__gigaserve_version" in config_seen["metadata"]
 
     server_runnable2_spy = mocker.spy(server_runnable2, "ainvoke")
     async with get_async_remote_runnable(app, path="/add_one_config") as runnable2:
@@ -879,7 +879,7 @@ async def test_input_validation(
         assert config_seen["tags"] == ["test"]
         assert config_seen["metadata"]["a"] == 5
         assert "__useragent" in config_seen["metadata"]
-        assert "__langserve_version" in config_seen["metadata"]
+        assert "__gigaserve_version" in config_seen["metadata"]
 
 
 @pytest.mark.asyncio
@@ -1027,7 +1027,7 @@ async def test_openapi_docs_with_identical_runnables(
 
 @pytest.mark.asyncio
 async def test_configurable_runnables(event_loop: AbstractEventLoop) -> None:
-    """Add tests for using langchain's configurable runnables"""
+    """Add tests for using gigachain's configurable runnables"""
 
     template = PromptTemplate.from_template("say {name}").configurable_fields(
         template=ConfigurableField(
@@ -1178,7 +1178,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
         assert response.json() == {"title": "RunnableBindingOutput", "type": "number"}
 
         # Just verify that the schema is not empty (it's pretty long)
-        # and the actual value should be tested in LangChain
+        # and the actual value should be tested in GigaChain
         response = await async_client.get("/prompt_1/output_schema")
         assert response.json() != {}  # Long string
 

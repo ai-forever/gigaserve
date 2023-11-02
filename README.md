@@ -40,8 +40,8 @@ We will be releasing a hosted version of LangServe for one-click deployments of 
 
 Use the `LangChain` CLI to bootstrap a `LangServe` project quickly.
 
-To use the langchain CLI make sure that you have a recent version of `langchain-cli` 
-installed. You can install it with `pip install -U "langchain-cli[serve]"`.
+To use the langchain CLI make sure that you have a recent version of `gigachain-cli` 
+installed. You can install it with `pip install -U "gigachain-cli[serve]"`.
 
 ```sh
 langchain app new ../path/to/directory
