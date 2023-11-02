@@ -18,7 +18,7 @@ response = requests.post(
         "X-Client-ID": "8324244b-7133-4d30-a328-31d8466e5502",
         "X-Session-ID": "8324244b-7133-4d30-a328-31d8466e5502",
         "X-Request-ID": "8324244b-7133-4d30-a328-31d8466e5502",
-    }
+    },
 )
 resp = response.json()
 print(resp["output"]["output_text"])

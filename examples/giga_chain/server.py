@@ -63,7 +63,12 @@ app.add_middleware(
 
 @app.middleware("http")
 async def gigachat_headers(request, call_next):
-    from gigachat.context import authorization_cvar, client_id_cvar, session_id_cvar, request_id_cvar
+    from gigachat.context import (
+        authorization_cvar,
+        client_id_cvar,
+        request_id_cvar,
+        session_id_cvar,
+    )
 
     # forwarding headers to gigachat
     authorization_cvar.set(request.headers.get("Authorization"))
