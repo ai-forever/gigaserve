@@ -12,7 +12,7 @@ vectorstore = FAISS.from_texts(
 retriever = vectorstore.as_retriever()
 
 app = FastAPI(
-    title="LangChain Server",
+    title="GigaChain Server",
     version="1.0",
     description="Spin up a simple api server using Langchain's Runnable interfaces",
 )

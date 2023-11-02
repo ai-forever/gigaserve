@@ -1,5 +1,7 @@
 # GigaServe 🦜️🏓 = LangServe + GigaChat
 
+🚩 We will be releasing a hosted version of LangServe for one-click deployments of LangChain applications. [Sign up here](https://airtable.com/app0hN6sd93QcKubv/shrAjst60xXa6quV2) to get on the waitlist.
+
 ## Overview
 
 `GigaServe = LangServe + GigaChain` helps developers deploy `GigaChain` [runnables and chains](https://python.langchain.com/docs/expression_language/) as a REST API.
@@ -19,11 +21,16 @@ A javascript client is available in [LangChainJS](https://js.langchain.com/docs/
 - Built-in (optional) tracing to [LangSmith](https://www.langchain.com/langsmith), just add your API key (see [Instructions](https://docs.smith.langchain.com/)])
 - All built with battle-tested open-source Python libraries like FastAPI, Pydantic, uvloop and asyncio.
 - Use the client SDK to call a LangServe server as if it was a Runnable running locally (or call the HTTP API directly)
+- [LangServe Hub](https://github.com/langchain-ai/langchain/blob/master/templates/README.md)
 
 ### Limitations
 
 - Client callbacks are not yet supported for events that originate on the server
 - Does not work with [pydantic v2 yet](https://github.com/tiangolo/fastapi/issues/10360)
+
+## Hosted LangServe
+
+We will be releasing a hosted version of LangServe for one-click deployments of LangChain applications. [Sign up here](https://airtable.com/app0hN6sd93QcKubv/shrAjst60xXa6quV2) to get on the waitlist.
 
 ## Security
 
@@ -33,18 +40,21 @@ A javascript client is available in [LangChainJS](https://js.langchain.com/docs/
 
 Use the `LangChain` CLI to bootstrap a `LangServe` project quickly.
 
-To use the langchain CLI make sure that you have a recent version of `langchain` installed
-and also `typer`. (`pip install langchain typer` or `pip install "langchain[cli]"`)
+To use the langchain CLI make sure that you have a recent version of `langchain-cli` 
+installed. You can install it with `pip install -U "langchain-cli[serve]"`.
 
 ```sh
-langchain ../path/to/directory
+langchain app new ../path/to/directory
 ```
-
-And follow the instructions...
 
 ## Examples
 
-For more examples, see the [examples](./examples) directory.
+Get your LangServe instance started quickly with 
+[LangChain Templates](https://github.com/langchain-ai/langchain/blob/master/templates/README.md).
+
+For more examples, see the templates 
+[index](https://github.com/langchain-ai/langchain/blob/master/templates/docs/INDEX.md) 
+or the [examples](./examples) directory.
 
 ### Server
 
@@ -60,9 +70,9 @@ from langserve import add_routes
 
 
 app = FastAPI(
-  title="LangChain Server",
+  title="GigaChain Server",
   version="1.0",
-  description="A simple api server using Langchain's Runnable interfaces",
+  description="A simple api server using GigaChain's Runnable interfaces",
 )
 
 add_routes(
@@ -211,6 +221,8 @@ adds of these endpoints to the server:
 ## Playground
 
 You can find a playground page for your runnable at `/my_runnable/playground`. This exposes a simple UI to [configure](https://python.langchain.com/docs/expression_language/how_to/configure) and invoke your runnable with streaming output and intermediate steps.
+
+![image](https://github.com/langchain-ai/langserve/assets/3205522/5ca56e29-f1bb-40f4-84b5-15916384a276)
 
 ## Installation
 

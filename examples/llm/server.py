@@ -7,7 +7,7 @@ from langchain.chat_models import ChatAnthropic, ChatOpenAI
 from langserve import add_routes
 
 app = FastAPI(
-    title="LangChain Server",
+    title="GigaChain Server",
     version="1.0",
     description="Spin up a simple api server using Langchain's Runnable interfaces",
 )

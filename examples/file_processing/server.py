@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """Example that shows how to upload files and process files in the server.
 
 This example uses a very simple architecture for dealing with file uploads
@@ -22,7 +23,7 @@ from pydantic import Field
 from langserve import CustomUserType, add_routes
 
 app = FastAPI(
-    title="LangChain Server",
+    title="GigaChain Server",
     version="1.0",
     description="Spin up a simple api server using Langchain's Runnable interfaces",
 )

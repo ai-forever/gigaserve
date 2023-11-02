@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "gigaserve"
-version = "0.0.19"
+version = "0.0.21"
 description = ""
 readme = "README.md"
 authors = ["LangChain", "GigaChain"]

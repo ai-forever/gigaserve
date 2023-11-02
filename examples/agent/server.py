@@ -54,7 +54,7 @@ agent = (
 agent_executor = AgentExecutor(agent=agent, tools=tools)
 
 app = FastAPI(
-    title="LangChain Server",
+    title="GigaChain Server",
     version="1.0",
     description="Spin up a simple api server using Langchain's Runnable interfaces",
 )
@@ -74,7 +74,7 @@ class Output(BaseModel):
 # /invoke
 # /batch
 # /stream
-add_routes(app, agent_executor, input_type=Input, output_type=Output)
+add_routes(app, agent_executor.with_types(input_type=Input, output_type=Output))
 
 if __name__ == "__main__":
     import uvicorn

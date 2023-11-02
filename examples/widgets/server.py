@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+"""Endpoint shows off available playground widgets."""
 import base64
 from typing import Any, Dict, List, Tuple
 
@@ -11,7 +13,7 @@ from pydantic import BaseModel, Field
 from langserve.server import add_routes
 
 app = FastAPI(
-    title="LangChain Server",
+    title="GigaChain Server",
     version="1.0",
     description="Spin up a simple api server using Langchain's Runnable interfaces",
 )

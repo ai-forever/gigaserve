@@ -5,6 +5,7 @@ This code contains integration for langchain runnables with FastAPI.
 The main entry point is the `add_routes` function which adds the routes to an existing
 FastAPI app or APIRouter.
 """
+import contextlib
 import json
 import re
 import weakref
@@ -13,32 +14,43 @@ from typing import (
     Any,
     AsyncIterator,
     Dict,
+    Generator,
     Literal,
     Mapping,
+    Optional,
     Sequence,
+    Tuple,
     Type,
     Union,
 )
 
 from fastapi import HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from langchain.callbacks.tracers.log_stream import RunLogPatch
 from langchain.load.serializable import Serializable
-from langchain.schema.runnable import Runnable
+from langchain.schema.runnable import Runnable, RunnableConfig
 from langchain.schema.runnable.config import get_config_list, merge_configs
 from typing_extensions import Annotated
 
 from langserve.callbacks import AsyncEventAggregatorCallback, CallbackEventDict
 from langserve.lzstring import LZString
-from langserve.schema import CustomUserType
+from langserve.schema import (
+    BatchResponseMetadata,
+    CustomUserType,
+    SingletonResponseMetadata,
+)
 
 try:
     from pydantic.v1 import BaseModel, create_model
 except ImportError:
-    from pydantic import BaseModel, Field, create_model
+    from pydantic import BaseModel, Field, ValidationError, create_model
 
 from langserve.playground import serve_playground
 from langserve.serialization import WellKnownLCSerializer
 from langserve.validation import (
+    BatchRequestShallowValidator,
+    InvokeRequestShallowValidator,
+    StreamLogParameters,
     create_batch_request_model,
     create_batch_response_model,
     create_invoke_request_model,
@@ -70,7 +82,7 @@ def _config_from_hash(config_hash: str) -> Dict[str, Any]:
         raise HTTPException(400, "Invalid config hash")
 
 
-def _unpack_config(
+def _unpack_request_config(
     *configs: Union[BaseModel, Mapping, str],
     keys: Sequence[str],
     model: Type[BaseModel],
@@ -82,8 +94,10 @@ def _unpack_config(
             config_dicts.append(model(**_config_from_hash(config)).dict())
         elif isinstance(config, BaseModel):
             config_dicts.append(config.dict())
+        elif isinstance(config, Mapping):
+            config_dicts.append(model(**config).dict())
         else:
-            config_dicts.append(config)
+            raise TypeError(f"Expected a string, dict or BaseModel got {type(config)}")
     config = merge_configs(*config_dicts)
     return {k: config[k] for k in keys if k in config}
 
@@ -107,14 +121,16 @@ def _unpack_input(validated_model: BaseModel) -> Any:
     return model
 
 
-def _rename_pydantic_model(model: Type[BaseModel], name: str) -> Type[BaseModel]:
+def _rename_pydantic_model(model: Type[BaseModel], prefix: str) -> Type[BaseModel]:
     """Rename the given pydantic model to the given name."""
     return create_model(
-        name,
+        prefix + model.__name__,
         __config__=model.__config__,
         **{
             fieldname: (
-                field.annotation,
+                _rename_pydantic_model(field.annotation, prefix)
+                if isclass(field.annotation) and issubclass(field.annotation, BaseModel)
+                else field.annotation,
                 Field(
                     field.default,
                     title=fieldname,
@@ -152,7 +168,7 @@ def _resolve_model(
     if model.__name__ in _SEEN_NAMES and hash_ not in _MODEL_REGISTRY:
         # If the model name has been seen before, but the model itself is different
         # generate a new name for the model.
-        model_to_use = _rename_pydantic_model(model, f"{namespace}{model.__name__}")
+        model_to_use = _rename_pydantic_model(model, namespace)
         hash_ = model_to_use.schema_json()
     else:
         model_to_use = model
@@ -177,10 +193,7 @@ def _add_namespace_to_model(namespace: str, model: Type[BaseModel]) -> Type[Base
     Returns:
         A new model with name prepended with the given namespace.
     """
-    model_with_unique_name = _rename_pydantic_model(
-        model,
-        f"{namespace}{model.__name__}",
-    )
+    model_with_unique_name = _rename_pydantic_model(model, namespace)
     model_with_unique_name.update_forward_refs()
     return model_with_unique_name
 
@@ -271,6 +284,35 @@ def _register_path_for_app(app: Union[FastAPI, APIRouter], path: str) -> None:
         _APP_TO_PATHS[app] = {path}
 
 
+@contextlib.contextmanager
+def _with_validation_error_translation() -> Generator[None, None, None]:
+    """Context manager to translate validation errors to request validation errors.
+
+    This makes sure that validation errors are surfaced as client side errors.
+    """
+    try:
+        yield
+    except ValidationError as e:
+        raise RequestValidationError(e.errors(), body=e.model)
+
+
+def _get_base_run_id_as_str(
+    event_aggregator: AsyncEventAggregatorCallback,
+) -> Optional[str]:
+    """
+    Uses `event_aggregator` to determine the base run ID for a given run. Returns
+    the run_id as a string, or None if it does not exist.
+    """
+    # The first run in the callback_events list corresponds to the
+    # overall trace for request
+    if event_aggregator.callback_events and event_aggregator.callback_events[0].get(
+        "run_id"
+    ):
+        return str(event_aggregator.callback_events[0].get("run_id"))
+    else:
+        raise AssertionError("No run_id found for the given run")
+
+
 # PUBLIC API
 
 
@@ -327,24 +369,11 @@ def add_routes(
             "Use `pip install sse_starlette` to install."
         )
 
-    _register_path_for_app(app, path)
+    if isinstance(app, FastAPI):  # type: ignore
+        # Cannot do this checking logic for a router since
+        # API routers are not hashable
+        _register_path_for_app(app, path)
     well_known_lc_serializer = WellKnownLCSerializer()
-
-    if hasattr(app, "openapi_tags") and app not in _APP_SEEN:
-        _APP_SEEN.add(app)
-        app.openapi_tags = [
-            *(getattr(app, "openapi_tags", []) or []),
-            {
-                "name": "default",
-            },
-            {
-                "name": "config",
-                "description": (
-                    "Endpoints with a default configuration "
-                    "set by `config_hash` path parameter."
-                ),
-            },
-        ]
 
     if path and not path.startswith("/"):
         raise ValueError(
@@ -355,6 +384,36 @@ def add_routes(
     namespace = path or ""
 
     model_namespace = _replace_non_alphanumeric_with_underscores(path.strip("/"))
+
+    route_tags = [path.strip("/")] if path else None
+    route_tags_with_config = [f"{path.strip('/')}/config"] if path else ["config"]
+
+    def _route_name(name: str) -> str:
+        """Return the route name with the given name."""
+        return f"{path.strip('/')} {name}" if path else name
+
+    def _route_name_with_config(name: str) -> str:
+        """Return the route name with the given name."""
+        return (
+            f"{path.strip('/')} {name} with config" if path else f"{name} with config"
+        )
+
+    if hasattr(app, "openapi_tags") and (path or (app not in _APP_SEEN)):
+        if not path:
+            _APP_SEEN.add(app)
+        app.openapi_tags = [
+            *(getattr(app, "openapi_tags", []) or []),
+            {
+                "name": route_tags[0] if route_tags else "default",
+            },
+            {
+                "name": route_tags_with_config[0],
+                "description": (
+                    "Endpoints with a default configuration "
+                    "set by `config_hash` path parameter."
+                ),
+            },
+        ]
 
     with_types = {}
 
@@ -394,30 +453,54 @@ def add_routes(
     InvokeResponse = create_invoke_response_model(model_namespace, output_type_)
     BatchResponse = create_batch_response_model(model_namespace, output_type_)
 
+    async def _get_config_and_input(
+        request: Request, config_hash: str
+    ) -> Tuple[RunnableConfig, Any]:
+        """Extract the config and input from the request, validating the request."""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            raise RequestValidationError(errors=["Invalid JSON body"])
+        try:
+            body = InvokeRequestShallowValidator.validate(body)
+
+            # Merge the config from the path with the config from the body.
+            config = _unpack_request_config(
+                config_hash,
+                body.config,
+                keys=config_keys,
+                model=ConfigPayload,
+            )
+            # Unpack the input dynamically using the input schema of the runnable.
+            # This takes into account changes in the input type when
+            # using configuration.
+            schema = runnable.with_config(config).input_schema
+            input_ = schema.validate(body.input)
+            return config, _unpack_input(input_)
+        except ValidationError as e:
+            raise RequestValidationError(e.errors(), body=body)
+
     @app.post(
         namespace + "/c/{config_hash}/invoke",
         response_model=InvokeResponse,
-        tags=["config"],
+        include_in_schema=False,
     )
-    @app.post(f"{namespace}/invoke", response_model=InvokeResponse)
+    @app.post(
+        f"{namespace}/invoke", response_model=InvokeResponse, include_in_schema=False
+    )
     async def invoke(
-        invoke_request: Annotated[InvokeRequest, InvokeRequest],
         request: Request,
         config_hash: str = "",
     ) -> InvokeResponse:
         """Invoke the runnable with the given input and config."""
-        # Request is first validated using InvokeRequest which takes into account
-        # config_keys as well as input_type.
-        config = _unpack_config(
-            config_hash, invoke_request.config, keys=config_keys, model=ConfigPayload
-        )
-        _add_tracing_info_to_metadata(config, request)
+        # We do not use the InvokeRequest model here since configurable runnables
+        # have dynamic schema -- so the validation below is a bit more involved.
+        config, input_ = await _get_config_and_input(request, config_hash)
+
         event_aggregator = AsyncEventAggregatorCallback()
+        _add_tracing_info_to_metadata(config, request)
         config["callbacks"] = [event_aggregator]
-        output = await runnable.ainvoke(
-            _unpack_input(invoke_request.input),
-            config=config,
-        )
+        output = await runnable.ainvoke(input_, config=config)
 
         if include_callback_events:
             callback_events = [
@@ -432,53 +515,83 @@ def add_routes(
             # Callbacks are scrubbed and exceptions are converted to serializable format
             # before returned in the response.
             callback_events=callback_events,
+            metadata=SingletonResponseMetadata(
+                run_id=_get_base_run_id_as_str(event_aggregator)
+            ),
         )
 
     @app.post(
         namespace + "/c/{config_hash}/batch",
         response_model=BatchResponse,
-        tags=["config"],
+        include_in_schema=False,
     )
-    @app.post(f"{namespace}/batch", response_model=BatchResponse)
+    @app.post(
+        f"{namespace}/batch", response_model=BatchResponse, include_in_schema=False
+    )
     async def batch(
-        batch_request: Annotated[BatchRequest, BatchRequest],
         request: Request,
         config_hash: str = "",
     ) -> BatchResponse:
         """Invoke the runnable with the given inputs and config."""
-        # First convert to list type
-        if isinstance(batch_request.config, list):
-            configs = [
-                _unpack_config(
-                    config_hash, config, keys=config_keys, model=ConfigPayload
-                )
-                for config in batch_request.config
-            ]
-        else:
-            configs = _unpack_config(
-                config_hash,
-                batch_request.config,
-                keys=config_keys,
-                model=ConfigPayload,
-            )
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            raise RequestValidationError(errors=["Invalid JSON body"])
 
-        # Unpack
+        with _with_validation_error_translation():
+            body = BatchRequestShallowValidator.validate(body)
+            config = body.config
+
+            # First unpack the config
+            if isinstance(config, list):
+                if len(config) != len(body.inputs):
+                    raise HTTPException(
+                        422,
+                        f"Number of configs ({len(config)}) must "
+                        f"match number of inputs ({len(body.inputs)})",
+                    )
+
+                configs = [
+                    _unpack_request_config(
+                        config_hash, config, keys=config_keys, model=ConfigPayload
+                    )
+                    for config in config
+                ]
+            elif isinstance(config, dict):
+                configs = _unpack_request_config(
+                    config_hash,
+                    config,
+                    keys=config_keys,
+                    model=ConfigPayload,
+                )
+            else:
+                raise HTTPException(
+                    422, "Value for 'config' key must be a dict or list if provided"
+                )
+
+        inputs_ = body.inputs
 
         # Make sure that the number of configs matches the number of inputs
         # Since we'll be adding callbacks to the configs.
-        _configs = get_config_list(configs, len(batch_request.inputs))
 
-        aggregators = [
-            AsyncEventAggregatorCallback() for _ in range(len(batch_request.inputs))
+        configs_ = [
+            {k: v for k, v in config_.items() if k in config_keys}
+            for config_ in get_config_list(configs, len(inputs_))
         ]
 
-        for c, aggregator in zip(_configs, aggregators):
-            _add_tracing_info_to_metadata(c, request)
-            c["callbacks"] = [aggregator]
+        inputs = [
+            _unpack_input(runnable.with_config(config_).input_schema.validate(input_))
+            for config_, input_ in zip(configs_, inputs_)
+        ]
 
-        inputs = [_unpack_input(input_) for input_ in batch_request.inputs]
+        # Update the configuration with callbacks
+        aggregators = [AsyncEventAggregatorCallback() for _ in range(len(inputs))]
 
-        output = await runnable.abatch(inputs, config=_configs)
+        for config_, aggregator in zip(configs_, aggregators):
+            _add_tracing_info_to_metadata(config_, request)
+            config_["callbacks"] = [aggregator]
+
+        output = await runnable.abatch(inputs, config=configs_)
 
         if include_callback_events:
             callback_events = [
@@ -496,13 +609,318 @@ def add_routes(
         return BatchResponse(
             output=well_known_lc_serializer.dumpd(output),
             callback_events=callback_events,
+            metadata=BatchResponseMetadata(
+                run_ids=[_get_base_run_id_as_str(agg) for agg in aggregators]
+            ),
         )
 
-    @app.post(namespace + "/c/{config_hash}/stream", tags=["config"])
-    @app.post(f"{namespace}/stream")
+    @app.post(
+        namespace + "/c/{config_hash}/stream",
+        tags=route_tags_with_config,
+        name=_route_name_with_config("stream"),
+    )
+    @app.post(f"{namespace}/stream", tags=route_tags, name=_route_name("stream"))
     async def stream(
-        stream_request: Annotated[StreamRequest, StreamRequest],
         request: Request,
+        config_hash: str = "",
+    ) -> EventSourceResponse:
+        """Invoke the runnable stream the output.
+
+        See documentation for endpoint at the end of the file.
+        It's attached to _stream_docs endpoint.
+        """
+        err_event = {}
+        validation_exception: Optional[BaseException] = None
+        try:
+            config, input_ = await _get_config_and_input(request, config_hash)
+        except BaseException as e:
+            validation_exception = e
+            if isinstance(e, RequestValidationError):
+                err_event = {
+                    "event": "error",
+                    "data": json.dumps(
+                        {"status_code": 422, "message": repr(e.errors())}
+                    ),
+                }
+            else:
+                err_event = {
+                    "event": "error",
+                    # Do not expose the error message to the client since
+                    # the message may contain sensitive information.
+                    "data": json.dumps(
+                        {"status_code": 500, "message": "Internal Server Error"}
+                    ),
+                }
+
+        async def _stream() -> AsyncIterator[dict]:
+            """Stream the output of the runnable."""
+            if validation_exception:
+                yield err_event
+                if isinstance(validation_exception, RequestValidationError):
+                    return
+                else:
+                    raise AssertionError(
+                        "Internal server error"
+                    ) from validation_exception
+
+            try:
+                async for chunk in runnable.astream(
+                    input_,
+                    config=config,
+                ):
+                    yield {
+                        "data": well_known_lc_serializer.dumps(chunk),
+                        "event": "data",
+                    }
+                yield {"event": "end"}
+            except BaseException:
+                yield {
+                    "event": "error",
+                    # Do not expose the error message to the client since
+                    # the message may contain sensitive information.
+                    # We'll add client side errors for validation as well.
+                    "data": json.dumps(
+                        {"status_code": 500, "message": "Internal Server Error"}
+                    ),
+                }
+                raise
+
+        return EventSourceResponse(_stream())
+
+    @app.post(
+        namespace + "/c/{config_hash}/stream_log",
+        tags=route_tags_with_config,
+        name=_route_name_with_config("stream_log"),
+    )
+    @app.post(
+        f"{namespace}/stream_log", tags=route_tags, name=_route_name("stream_log")
+    )
+    async def stream_log(
+        request: Request,
+        config_hash: str = "",
+    ) -> EventSourceResponse:
+        """Invoke the runnable stream_log the output.
+
+        View documentation for endpoint at the end of the file.
+        It's attached to _stream_log_docs endpoint.
+        """
+        err_event = {}
+        validation_exception: Optional[BaseException] = None
+        try:
+            config, input_ = await _get_config_and_input(request, config_hash)
+        except BaseException as e:
+            validation_exception = e
+            if isinstance(e, RequestValidationError):
+                err_event = {
+                    "event": "error",
+                    "data": json.dumps(
+                        {"status_code": 422, "message": repr(e.errors())}
+                    ),
+                }
+            else:
+                err_event = {
+                    "event": "error",
+                    # Do not expose the error message to the client since
+                    # the message may contain sensitive information.
+                    "data": json.dumps(
+                        {"status_code": 500, "message": "Internal Server Error"}
+                    ),
+                }
+
+        try:
+            body = await request.json()
+            with _with_validation_error_translation():
+                stream_log_request = StreamLogParameters(**body)
+        except json.JSONDecodeError:
+            # Body as text
+            validation_exception = RequestValidationError(errors=["Invalid JSON body"])
+            err_event = {
+                "event": "error",
+                "data": json.dumps(
+                    {"status_code": 422, "message": "Invalid JSON body"}
+                ),
+            }
+        except RequestValidationError as e:
+            validation_exception = e
+            err_event = {
+                "event": "error",
+                "data": json.dumps({"status_code": 422, "message": repr(e.errors())}),
+            }
+
+        async def _stream_log() -> AsyncIterator[dict]:
+            """Stream the output of the runnable."""
+            if validation_exception:
+                yield err_event
+                if isinstance(validation_exception, RequestValidationError):
+                    return
+                else:
+                    raise AssertionError(
+                        "Internal server error"
+                    ) from validation_exception
+
+            try:
+                async for chunk in runnable.astream_log(
+                    input_,
+                    config=config,
+                    diff=True,
+                    include_names=stream_log_request.include_names,
+                    include_types=stream_log_request.include_types,
+                    include_tags=stream_log_request.include_tags,
+                    exclude_names=stream_log_request.exclude_names,
+                    exclude_types=stream_log_request.exclude_types,
+                    exclude_tags=stream_log_request.exclude_tags,
+                ):
+                    if not isinstance(chunk, RunLogPatch):
+                        raise AssertionError(
+                            f"Expected a RunLog instance got {type(chunk)}"
+                        )
+                    data = {
+                        "ops": chunk.ops,
+                    }
+
+                    # Temporary adapter
+                    yield {
+                        "data": well_known_lc_serializer.dumps(data),
+                        "event": "data",
+                    }
+                yield {"event": "end"}
+            except BaseException:
+                yield {
+                    "event": "error",
+                    # Do not expose the error message to the client since
+                    # the message may contain sensitive information.
+                    # We'll add client side errors for validation as well.
+                    "data": json.dumps(
+                        {"status_code": 500, "message": "Internal Server Error"}
+                    ),
+                }
+                raise
+
+        return EventSourceResponse(_stream_log())
+
+    @app.get(
+        namespace + "/c/{config_hash}/input_schema",
+        tags=route_tags_with_config,
+        name=_route_name_with_config("input_schema"),
+    )
+    @app.get(
+        f"{namespace}/input_schema", tags=route_tags, name=_route_name("input_schema")
+    )
+    async def input_schema(config_hash: str = "") -> Any:
+        """Return the input schema of the runnable."""
+        with _with_validation_error_translation():
+            config = _unpack_request_config(
+                config_hash, keys=config_keys, model=ConfigPayload
+            )
+
+        return runnable.get_input_schema(config).schema()
+
+    @app.get(
+        namespace + "/c/{config_hash}/output_schema",
+        tags=route_tags_with_config,
+        name=_route_name_with_config("output_schema"),
+    )
+    @app.get(
+        f"{namespace}/output_schema", tags=route_tags, name=_route_name("output_schema")
+    )
+    async def output_schema(config_hash: str = "") -> Any:
+        """Return the output schema of the runnable."""
+        with _with_validation_error_translation():
+            config = _unpack_request_config(
+                config_hash, keys=config_keys, model=ConfigPayload
+            )
+        return runnable.get_output_schema(config).schema()
+
+    @app.get(
+        namespace + "/c/{config_hash}/config_schema",
+        tags=route_tags_with_config,
+        name=_route_name_with_config("config_schema"),
+    )
+    @app.get(
+        f"{namespace}/config_schema", tags=route_tags, name=_route_name("config_schema")
+    )
+    async def config_schema(config_hash: str = "") -> Any:
+        """Return the config schema of the runnable."""
+        with _with_validation_error_translation():
+            config = _unpack_request_config(
+                config_hash, keys=config_keys, model=ConfigPayload
+            )
+        return runnable.with_config(config).config_schema(include=config_keys).schema()
+
+    @app.get(
+        namespace + "/c/{config_hash}/playground/{file_path:path}",
+        include_in_schema=False,
+    )
+    @app.get(namespace + "/playground/{file_path:path}", include_in_schema=False)
+    async def playground(file_path: str, config_hash: str = "") -> Any:
+        """Return the playground of the runnable."""
+        with _with_validation_error_translation():
+            config = _unpack_request_config(
+                config_hash, keys=config_keys, model=ConfigPayload
+            )
+        return await serve_playground(
+            runnable.with_config(config),
+            runnable.with_config(config).input_schema,
+            config_keys,
+            f"{namespace}/playground",
+            file_path,
+        )
+
+    #######################################
+    # Documentation variants of end points.
+    #######################################
+    @app.post(
+        namespace + "/c/{config_hash}/invoke",
+        response_model=InvokeResponse,
+        tags=route_tags_with_config,
+        name=_route_name_with_config("invoke"),
+    )
+    @app.post(
+        f"{namespace}/invoke",
+        response_model=InvokeResponse,
+        tags=route_tags,
+        name=_route_name("invoke"),
+    )
+    async def _invoke_docs(
+        invoke_request: Annotated[InvokeRequest, InvokeRequest],
+        config_hash: str = "",
+    ) -> InvokeResponse:
+        """Invoke the runnable with the given input and config."""
+        raise AssertionError("This endpoint should not be reachable.")
+
+    @app.post(
+        namespace + "/c/{config_hash}/batch",
+        response_model=BatchResponse,
+        tags=route_tags_with_config,
+        name=_route_name_with_config("batch"),
+    )
+    @app.post(
+        f"{namespace}/batch",
+        response_model=BatchResponse,
+        tags=route_tags,
+        name=_route_name("batch"),
+    )
+    async def _batch_docs(
+        batch_request: Annotated[BatchRequest, BatchRequest],
+        config_hash: str = "",
+    ) -> BatchResponse:
+        """Batch invoke the runnable with the given inputs and config."""
+        raise AssertionError("This endpoint should not be reachable.")
+
+    @app.post(
+        namespace + "/c/{config_hash}/stream",
+        include_in_schema=True,
+        tags=route_tags_with_config,
+        name=_route_name_with_config("stream"),
+    )
+    @app.post(
+        f"{namespace}/stream",
+        include_in_schema=True,
+        tags=route_tags,
+        name=_route_name("stream"),
+    )
+    async def _stream_docs(
+        stream_request: Annotated[StreamRequest, StreamRequest],
         config_hash: str = "",
     ) -> EventSourceResponse:
         """Invoke the runnable stream the output.
@@ -546,46 +964,22 @@ def add_routes(
                 "event": "end",
             }
         """
-        # Request is first validated using InvokeRequest which takes into account
-        # config_keys as well as input_type.
-        # After validation, the input is loaded using LangChain's load function.
-        input_ = _unpack_input(stream_request.input)
-        config = _unpack_config(
-            config_hash, stream_request.config, keys=config_keys, model=ConfigPayload
-        )
-        _add_tracing_info_to_metadata(config, request)
+        raise AssertionError("This endpoint should not be reachable.")
 
-        async def _stream() -> AsyncIterator[dict]:
-            """Stream the output of the runnable."""
-            try:
-                async for chunk in runnable.astream(
-                    input_,
-                    config=config,
-                ):
-                    yield {
-                        "data": well_known_lc_serializer.dumps(chunk),
-                        "event": "data",
-                    }
-                yield {"event": "end"}
-            except BaseException:
-                yield {
-                    "event": "error",
-                    # Do not expose the error message to the client since
-                    # the message may contain sensitive information.
-                    # We'll add client side errors for validation as well.
-                    "data": json.dumps(
-                        {"status_code": 500, "message": "Internal Server Error"}
-                    ),
-                }
-                raise
-
-        return EventSourceResponse(_stream())
-
-    @app.post(namespace + "/c/{config_hash}/stream_log", tags=["config"])
-    @app.post(f"{namespace}/stream_log")
-    async def stream_log(
+    @app.post(
+        namespace + "/c/{config_hash}/stream_log",
+        include_in_schema=True,
+        tags=route_tags_with_config,
+        name=_route_name_with_config("stream_log"),
+    )
+    @app.post(
+        f"{namespace}/stream_log",
+        include_in_schema=True,
+        tags=route_tags,
+        name=_route_name("stream_log"),
+    )
+    async def _stream_log_docs(
         stream_log_request: Annotated[StreamLogRequest, StreamLogRequest],
-        request: Request,
         config_hash: str = "",
     ) -> EventSourceResponse:
         """Invoke the runnable stream_log the output.
@@ -630,96 +1024,4 @@ def add_routes(
                 "event": "end",
             }
         """
-        # Request is first validated using InvokeRequest which takes into account
-        # config_keys as well as input_type.
-        # After validation, the input is loaded using LangChain's load function.
-        input_ = _unpack_input(stream_log_request.input)
-        config = _unpack_config(
-            config_hash,
-            stream_log_request.config,
-            keys=config_keys,
-            model=ConfigPayload,
-        )
-        _add_tracing_info_to_metadata(config, request)
-
-        async def _stream_log() -> AsyncIterator[dict]:
-            """Stream the output of the runnable."""
-            try:
-                async for chunk in runnable.astream_log(
-                    input_,
-                    config=config,
-                    diff=True,
-                    include_names=stream_log_request.include_names,
-                    include_types=stream_log_request.include_types,
-                    include_tags=stream_log_request.include_tags,
-                    exclude_names=stream_log_request.exclude_names,
-                    exclude_types=stream_log_request.exclude_types,
-                    exclude_tags=stream_log_request.exclude_tags,
-                ):
-                    if not isinstance(chunk, RunLogPatch):
-                        raise AssertionError(
-                            f"Expected a RunLog instance got {type(chunk)}"
-                        )
-                    data = {
-                        "ops": chunk.ops,
-                    }
-
-                    # Temporary adapter
-                    yield {
-                        "data": well_known_lc_serializer.dumps(data),
-                        "event": "data",
-                    }
-                yield {"event": "end"}
-            except BaseException:
-                yield {
-                    "event": "error",
-                    # Do not expose the error message to the client since
-                    # the message may contain sensitive information.
-                    # We'll add client side errors for validation as well.
-                    "data": json.dumps(
-                        {"status_code": 500, "message": "Internal Server Error"}
-                    ),
-                }
-                raise
-
-        return EventSourceResponse(_stream_log())
-
-    @app.get(namespace + "/c/{config_hash}/input_schema", tags=["config"])
-    @app.get(f"{namespace}/input_schema")
-    async def input_schema(config_hash: str = "") -> Any:
-        """Return the input schema of the runnable."""
-        return runnable.get_input_schema(
-            _unpack_config(config_hash, keys=config_keys, model=ConfigPayload)
-        ).schema()
-
-    @app.get(namespace + "/c/{config_hash}/output_schema", tags=["config"])
-    @app.get(f"{namespace}/output_schema")
-    async def output_schema(config_hash: str = "") -> Any:
-        """Return the output schema of the runnable."""
-        return runnable.get_output_schema(
-            _unpack_config(config_hash, keys=config_keys, model=ConfigPayload)
-        ).schema()
-
-    @app.get(namespace + "/c/{config_hash}/config_schema", tags=["config"])
-    @app.get(f"{namespace}/config_schema")
-    async def config_schema(config_hash: str = "") -> Any:
-        """Return the config schema of the runnable."""
-        config = _unpack_config(config_hash, keys=config_keys, model=ConfigPayload)
-        return runnable.with_config(config).config_schema(include=config_keys).schema()
-
-    @app.get(
-        namespace + "/c/{config_hash}/playground/{file_path:path}",
-        tags=["config"],
-        include_in_schema=False,
-    )
-    @app.get(namespace + "/playground/{file_path:path}", include_in_schema=False)
-    async def playground(file_path: str, config_hash: str = "") -> Any:
-        """Return the playground of the runnable."""
-        config = _unpack_config(config_hash, keys=config_keys, model=ConfigPayload)
-        return await serve_playground(
-            runnable.with_config(config),
-            runnable.with_config(config).input_schema,
-            config_keys,
-            f"{namespace}/playground",
-            file_path,
-        )
+        raise AssertionError("This endpoint should not be reachable.")
