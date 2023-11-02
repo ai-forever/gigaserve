@@ -28,8 +28,8 @@ def get_langserve_export(filepath: Path) -> LangServeExport:
     with open(filepath, "rb") as f:
         data = load(f)
     try:
-        module = data["tool"]["langserve"]["export_module"]
-        attr = data["tool"]["langserve"]["export_attr"]
+        module = data["tool"]["gigaserve"]["export_module"]
+        attr = data["tool"]["gigaserve"]["export_attr"]
         package_name = data["tool"]["poetry"]["name"]
     except KeyError as e:
         raise KeyError("Invalid LangServe PyProject.toml") from e

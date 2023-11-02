@@ -231,28 +231,28 @@ def _setup_global_app_handlers(app: Union[FastAPI, APIRouter]) -> None:
     @app.on_event("startup")
     async def startup_event():
         # ruff: noqa: E501
-        LANGSERVE = """
- __          ___      .__   __.   _______      _______. _______ .______     ____    ____  _______ 
-|  |        /   \     |  \ |  |  /  _____|    /       ||   ____||   _  \    \   \  /   / |   ____|
-|  |       /  ^  \    |   \|  | |  |  __     |   (----`|  |__   |  |_)  |    \   \/   /  |  |__   
-|  |      /  /_\  \   |  . `  | |  | |_ |     \   \    |   __|  |      /      \      /   |   __|  
-|  `----./  _____  \  |  |\   | |  |__| | .----)   |   |  |____ |  |\  \----.  \    /    |  |____ 
-|_______/__/     \__\ |__| \__|  \______| |_______/    |_______|| _| `._____|   \__/     |_______|
+        GIGASERVE = """
+  _______  __    _______      ___           _______. _______ .______     ____    ____  _______ 
+ /  _____||  |  /  _____|    /   \         /       ||   ____||   _  \    \   \  /   / |   ____|
+|  |  __  |  | |  |  __     /  ^  \       |   (----`|  |__   |  |_)  |    \   \/   /  |  |__   
+|  | |_ | |  | |  | |_ |   /  /_\  \       \   \    |   __|  |      /      \      /   |   __|  
+|  |__| | |  | |  |__| |  /  _____  \  .----)   |   |  |____ |  |\  \----.  \    /    |  |____ 
+ \______| |__|  \______| /__/     \__\ |_______/    |_______|| _| `._____|   \__/     |_______|
 """
 
         def green(text):
             return "\x1b[1;32;40m" + text + "\x1b[0m"
 
         paths = _APP_TO_PATHS[app]
-        print(LANGSERVE)
+        print(GIGASERVE)
         for path in paths:
             print(
-                f'{green("LANGSERVE:")} Playground for chain "{path or "/"}" is live at:'
+                f'{green("GIGASERVE:")} Playground for chain "{path or "/"}" is live at:'
             )
-            print(f'{green("LANGSERVE:")}  │')
-            print(f'{green("LANGSERVE:")}  └──> {path}/playground')
-            print(f'{green("LANGSERVE:")}')
-        print(f'{green("LANGSERVE:")} See all available routes at {app.docs_url}')
+            print(f'{green("GIGASERVE:")}  │')
+            print(f'{green("GIGASERVE:")}  └──> {path}/playground')
+            print(f'{green("GIGASERVE:")}')
+        print(f'{green("GIGASERVE:")} See all available routes at {app.docs_url}')
         print()
 
 

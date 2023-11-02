@@ -1,11 +1,11 @@
 {
-  "name": "langserve-playground",
+  "name": "gigaserve-playground",
   "version": "0.0.1",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "license": "MIT",
-  "author": "LangChain",
+  "author": "LangChain, GigaChain",
   "scripts": {
     "build": "tsup src/index.tsx",
     "dev": "tsup src/index.tsx --watch"
@@ -15,6 +15,9 @@
   ],
   "keywords": [
     "langserve",
+    "gigaserve",
+    "gigachat",
+    "gigachain",
     "playground"
   ],
   "devDependencies": {

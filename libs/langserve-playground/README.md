@@ -1,2 +1,2 @@
-# LangServe Playground 🦜️🔗
+# GigaServe Playground 🦜️🔗
 
