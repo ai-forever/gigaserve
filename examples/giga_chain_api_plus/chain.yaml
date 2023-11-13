@@ -1,0 +1,139 @@
+_type: analyze_document_chain
+combine_docs_chain:
+  _type: map_reduce_documents_chain
+  document_variable_name: text
+  input_key: input_documents
+  llm_chain:
+    _type: llm_chain
+    llm:
+      _type: giga-chat-model
+      max_tokens: null
+      model: null
+      profanity: false
+      streaming: false
+      temperature: null
+    llm_kwargs: {}
+    memory: null
+    metadata: null
+    output_key: text
+    output_parser:
+      _type: default
+    prompt:
+      _type: prompt
+      input_types: {}
+      input_variables:
+      - text
+      output_parser: null
+      partial_variables: {}
+      template: "\u0412\u044B\u0434\u0435\u043B\u0438 5 \u0433\u043B\u0430\u0432\u043D\
+        \u044B\u0445 \u0444\u0430\u043A\u0442\u043E\u0432 \u0438 \u043C\u044B\u0441\
+        \u043B\u0435\u0439 \u0438\u0437 \u044D\u0442\u043E\u0433\u043E \u0442\u0435\
+        \u043A\u0441\u0442\u0430. \u0421\u0444\u043E\u0440\u043C\u0443\u043B\u0438\
+        \u0440\u0443\u0439 \u043A\u0430\u0436\u0434\u044B \u0444\u0430\u043A\u0442\
+        \ \u0432 \u0432\u0438\u0434\u0435 \u043E\u0434\u043D\u043E\u0439 \u0441\u0442\
+        \u0440\u043E\u043A\u0438.\n\n\"{text}\"\n\n\u041E\u0441\u043D\u043E\u0432\u043D\
+        \u044B\u0435 5 \u0444\u0430\u043A\u0442\u043E\u0432:"
+      template_format: f-string
+      validate_template: false
+    return_final_only: true
+    tags: null
+    verbose: false
+  memory: null
+  metadata: null
+  output_key: output_text
+  reduce_documents_chain:
+    _type: reduce_documents_chain
+    collapse_documents_chain: null
+    combine_documents_chain:
+      _type: stuff_documents_chain
+      document_prompt:
+        _type: prompt
+        input_types: {}
+        input_variables:
+        - page_content
+        output_parser: null
+        partial_variables: {}
+        template: '{page_content}'
+        template_format: f-string
+        validate_template: false
+      document_separator: '
+
+
+        '
+      document_variable_name: text
+      input_key: input_documents
+      llm_chain:
+        _type: llm_chain
+        llm:
+          _type: giga-chat-model
+          max_tokens: null
+          model: null
+          profanity: false
+          streaming: false
+          temperature: null
+        llm_kwargs: {}
+        memory: null
+        metadata: null
+        output_key: text
+        output_parser:
+          _type: default
+        prompt:
+          _type: prompt
+          input_types: {}
+          input_variables:
+          - text
+          output_parser: null
+          partial_variables: {}
+          template: "\u041D\u0438\u0436\u0435 \u043F\u0440\u0438\u0432\u0435\u0434\
+            \u0435\u043D \u043D\u0430\u0431\u043E\u0440 \u0444\u0430\u043A\u0442\u043E\
+            \u0432 \u0438 \u043C\u044B\u0441\u043B\u0435\u0439. \u0412\u044B\u0434\
+            \u0435\u043B\u0438 \u0438\u0437 \u043D\u0438\u0445 7 \u0441\u0430\u043C\
+            \u044B\u0445 \u0432\u0430\u0436\u043D\u044B\u0445.\n\n\"{text}\"\n\n\u041E\
+            \u0441\u043D\u043E\u0432\u043D\u044B\u0435 7 \u0444\u0430\u043A\u0442\u043E\
+            \u0432 \u0438\u0437 \u0442\u0435\u043A\u0441\u0442\u0430:"
+          template_format: f-string
+          validate_template: false
+        return_final_only: true
+        tags: null
+        verbose: false
+      memory: null
+      metadata: null
+      output_key: output_text
+      tags: null
+      verbose: false
+    input_key: input_documents
+    memory: null
+    metadata: null
+    output_key: output_text
+    tags: null
+    token_max: 3000
+    verbose: false
+  return_intermediate_steps: false
+  tags: null
+  verbose: false
+input_key: input_document
+memory: null
+metadata: null
+tags: null
+text_splitter:
+  _type: RecursiveCharacterTextSplitter
+  add_start_index: false
+  chunk_overlap: 0
+  chunk_size: 4000
+  is_separator_regex: false
+  keep_separator: true
+  length_function:
+    module: builtins
+    name: len
+  separators:
+  - '
+
+
+    '
+  - '
+
+    '
+  - ' '
+  - ''
+  strip_whitespace: true
+verbose: false
