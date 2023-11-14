@@ -9,7 +9,6 @@ import fastapi
 from gigachat.exceptions import AuthenticationError
 from langchain.pydantic_v1 import BaseModel
 from langchain.chains.loading import load_chain_from_config
-import yaml
 from contextvars_executor import ContextVarExecutor
 from gigachat.context import (
     authorization_cvar,
@@ -43,7 +42,7 @@ async def middleware(request, call_next):
 
 
 class Payload(BaseModel):
-    chain_yaml: str
+    chain_config: dict[str, Any]
     input: dict[str, Any]
 
 
@@ -53,8 +52,7 @@ class Result(BaseModel):
 
 @app.post("/chain_invoke")
 def chain_invoke(payload: Payload) -> Result:
-    config = yaml.safe_load(payload.chain_yaml)
-    chain = load_chain_from_config(config)
+    chain = load_chain_from_config(payload.chain_config)
     try:
         output = chain.invoke(input=payload.input)
         return Result(output=output)

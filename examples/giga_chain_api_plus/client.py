@@ -1,9 +1,9 @@
 """Пример вызова суммаризации статьи "Великий аттрактор" из Википедии"""
 import requests
-
+import yaml
 
 with open("chain.yaml", "r", encoding="utf-8") as f:
-    CHAIN = f.read()
+    CHAIN_CONFIG = yaml.safe_load(f)
 
 with open("attractor.txt", "r", encoding="utf-8") as f:
     TEXT = f.read()
@@ -14,7 +14,7 @@ with open("access_token.txt", "r", encoding="utf-8") as f:
 # Пример обращения с помощью requests
 response = requests.post(
     "http://localhost:8000/chain_invoke",
-    json={"chain_yaml": CHAIN, "input": {"input_document": TEXT}},
+    json={"chain_config": CHAIN_CONFIG, "input": {"input_document": TEXT}},
     timeout=600,
     headers={
         "Authorization": f"Bearer {ACCESS_TOKEN}",
