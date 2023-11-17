@@ -1,70 +1,62 @@
 # GigaServe 🦜️🏓 = LangServe + GigaChat
 
-[![Release Notes](https://img.shields.io/github/release/langchain-ai/langserve)](https://github.com/langchain-ai/langserve/releases)
-[![Downloads](https://static.pepy.tech/badge/langserve/month)](https://pepy.tech/project/langserve)
-[![Open Issues](https://img.shields.io/github/issues-raw/langchain-ai/langserve)](https://github.com/langchain-ai/langserve/issues)
-[![](https://dcbadge.vercel.app/api/server/6adMQxSpJS?compact=true&style=flat)](https://discord.com/channels/1038097195422978059/1170024642245832774)
+[![Release Notes](https://img.shields.io/github/release/langchain-ai/langserve)](https://github.com/ai-forever/gigaserve/releases)
+[![Скачивания](https://static.pepy.tech/badge/langserve/month)](https://www.pepy.tech/projects/gigaserve)
 
 🚩 We will be releasing a hosted version of LangServe for one-click deployments of LangChain applications. [Sign up here](https://airtable.com/app0hN6sd93QcKubv/shrAjst60xXa6quV2) to get on the waitlist.
 
-## Overview
+## О GigaServe
 
 `GigaServe = LangServe + GigaChain` helps developers deploy `GigaChain` [runnables and chains](https://python.langchain.com/docs/expression_language/) as a REST API.
 
-This library is integrated with [FastAPI](https://fastapi.tiangolo.com/) and uses [pydantic](https://docs.pydantic.dev/latest/) for data validation.
+С помощью библиотеки GigaServe вы можете реализовать REST API для предоставления доступа к runnable-интерфейсам и цепочкам GigaChain.
 
-In addition, it provides a client that can be used to call into runnables deployed on a server.
-A javascript client is available in [LangChainJS](https://js.langchain.com/docs/api/runnables_remote/classes/RemoteRunnable).
+Библиотека GigaServe интегрирована с [FastAPI](https://fastapi.tiangolo.com/) и использует для валидации данных [Pydantic](https://docs.pydantic.dev/latest/).
 
-## Features
+## Особенности библиотеки
 
-- Input and Output schemas automatically inferred from your LangChain object, and enforced on every API call, with rich error messages
-- API docs page with JSONSchema and Swagger (insert example link)
-- Efficient `/invoke`, `/batch` and `/stream` endpoints with support for many concurrent requests on a single server
-- `/stream_log` endpoint for streaming all (or some) intermediate steps from your chain/agent
-- Playground page at `/playground` with streaming output and intermediate steps
-- Built-in (optional) tracing to [LangSmith](https://www.langchain.com/langsmith), just add your API key (see [Instructions](https://docs.smith.langchain.com/)])
-- All built with battle-tested open-source Python libraries like FastAPI, Pydantic, uvloop and asyncio.
+- Схемы ввода и вывода автоматически определяются на основе объекта GigaChain, применяются для каждого запроса к API и обеспечивают подробные сообщения об ошибках.
+- Страница API-документации с JSONSchema и Swagger. 
+- Эффективные эндпоинты `/invoke`, `/batch` и `/stream` с поддержкой множества одновременных запросов на одном сервере.
+- Эндпоинт `/stream_log` для потоковой передачи всех или выбранных промежуточных шагов работы цепочки/агента.
+- Интерактивная страница `/playground` с потоковым выводом и демонстрацией промежуточных шагов.
+- Использование проверенных open-source библиотек Python таких, как FastAPI, Pydantic, uvloop и asyncio.
 - Use the client SDK to call a LangServe server as if it was a Runnable running locally (or call the HTTP API directly)
-- [LangServe Hub](https://github.com/langchain-ai/langchain/blob/master/templates/README.md)
+- Возможность обращения к серверу GigaServe с помощью клиентского SDK, как если бы это был локальный runnable-интерфейс (или возможность обратиться напрямую к HTTP API).
 
-### Limitations
+### Ограничения
 
-- Client callbacks are not yet supported for events that originate on the server
-- OpenAPI docs will not be generated when using Pydantic V2. Fast API does not support [mixing pydantic v1 and v2 namespaces](https://github.com/tiangolo/fastapi/issues/10360). See section below for more details.
+- Обратные вызовы клиента пока не поддерживаются для событий, происходящих на сервере
+- При использовании Pydantic V2 документация OpenAPI не генерируется. Это связанно с тем, что Fast API не поддерживает [смешивание пространств имен pydantic v1 и v2](https://github.com/tiangolo/fastapi/issues/10360). Подробнее в разделе ниже.
 
-## Hosted LangServe
+## Безопасность
 
-We will be releasing a hosted version of LangServe for one-click deployments of LangChain applications. [Sign up here](https://airtable.com/app0hN6sd93QcKubv/shrAjst60xXa6quV2) to get on the waitlist.
+Уязвимость в версиях 0.0.13 - 0.0.15 — Интерактивная страница, доступная по адресу `/playground`, позволяет получить доступ к произвольным файлам на сервере. [Устранено в версии 0.0.16](https://github.com/langchain-ai/langserve/pull/98).
 
-## Security
+## GigaChain CLI 🛠️
 
-* Vulnerability in Versions 0.0.13 - 0.0.15 -- playground endpoint allows accessing arbitrary files on server. [Resolved in 0.0.16](https://github.com/langchain-ai/langserve/pull/98).
-
-## LangChain CLI 🛠️
-
-Use the `GigaChain` CLI to bootstrap a `GigaChain` project quickly.
-
-To use the gigachain CLI make sure that you have a recent version of `gigachain-cli` 
-installed. You can install it with `pip install -U gigachain-cli`.
+Для быстрой настройки проекта GigaChain используйте актуальную версию GigaChain CLI:
 
 ```sh
-langchain app new ../path/to/directory
+gigachain app new ../path/to/directory
 ```
 
-## Examples
 
-Get your LangServe instance started quickly with 
-[LangChain Templates](https://github.com/langchain-ai/langchain/blob/master/templates/README.md).
+Вы можете установить актуальную версию CLI с помощью менеджера пакетов pip:
 
-For more examples, see the templates 
-[index](https://github.com/langchain-ai/langchain/blob/master/templates/docs/INDEX.md) 
-or the [examples](https://github.com/langchain-ai/langserve/tree/main/examples) directory.
+```sh
+pip install -U gigachain-cli
+```
 
-### Server
+## Примеры
 
-Here's a server that deploys an OpenAI chat model, an Anthropic chat model, and a chain that uses
-the Anthropic model to tell a joke about a topic.
+Для быстрого старта GigaServe используйте [шаблоны GigaChain](https://github.com/ai-forever/gigachain/blob/master/templates/README.md).
+
+Больше примеров шаблонов вы найдете в [соответствующей директории](https://github.com/ai-forever/gigaserve/tree/main/examples).
+
+### Сервер
+
+Пример ниже разворачивает модель чата OpenAI, модель чата Anthropic, и цепочку, которая генерирует шутку по заданной теме (`topic`) с помощью модели Anthropic.
 
 ```python
 #!/usr/bin/env python
@@ -77,7 +69,7 @@ from langserve import add_routes
 app = FastAPI(
   title="GigaChain Server",
   version="1.0",
-  description="A simple api server using GigaChain's Runnable interfaces",
+  description="Простой API-сервер, использующий runnable-интерфейсы GigaChain",
 )
 
 add_routes(
@@ -93,7 +85,7 @@ add_routes(
 )
 
 model = ChatAnthropic()
-prompt = ChatPromptTemplate.from_template("tell me a joke about {topic}")
+prompt = ChatPromptTemplate.from_template("расскажи шутку о {topic}")
 add_routes(
     app,
     prompt | model,
@@ -106,28 +98,22 @@ if __name__ == "__main__":
     uvicorn.run(app, host="localhost", port=8000)
 ```
 
-### Docs
+### Документация
 
-If you've deployed the server above, you can view the generated OpenAPI docs using:
+Сгенерированная OpenAPI-документация к серверу, развернутому с помощью предыдущего примера, доступна по адресу:
 
 ```sh
 curl localhost:8000/docs
 ```
 
-make sure to **add** the `/docs` suffix. 
+> [!NOTE]
+> Обращение к адресу `localhost:8000` будет возвращать ошибку 404, пока вы не определите `@app.get("/")`.
 
-Below will return a 404 until you define a `@app.get("/")`
+### Клиент
 
-```sh
-localhost:8000
-```
-
-### Client
-
-Python SDK
+Пример клиента на основе Python SDK:
 
 ```python
-
 from langchain.schema import SystemMessage, HumanMessage
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.runnable import RunnableMap
@@ -137,34 +123,36 @@ openai = RemoteRunnable("http://localhost:8000/openai/")
 anthropic = RemoteRunnable("http://localhost:8000/anthropic/")
 joke_chain = RemoteRunnable("http://localhost:8000/chain/")
 
-joke_chain.invoke({"topic": "parrots"})
+# Синхронный вызов
 
-# or async
-await joke_chain.ainvoke({"topic": "parrots"})
+joke_chain.invoke({"topic": "попугаи"})
+
+# Асинхронный вызов
+await joke_chain.ainvoke({"topic": "попугаии"})
 
 prompt = [
-    SystemMessage(content='Act like either a cat or a parrot.'),
-    HumanMessage(content='Hello!')
+    SystemMessage(content='Веди себя как кошка или попугай.'),
+    HumanMessage(content='Привет!')
 ]
 
-# Supports astream
+# Поддержка astream
 async for msg in anthropic.astream(prompt):
     print(msg, end="", flush=True)
 
 prompt = ChatPromptTemplate.from_messages(
-    [("system", "Tell me a long story about {topic}")]
+    [("system", "Расскажи мне длинную историю о {topic}")]
 )
 
-# Can define custom chains
+# Определение собственных цепочек
 chain = prompt | RunnableMap({
     "openai": openai,
     "anthropic": anthropic,
 })
 
-chain.batch([{ "topic": "parrots" }, { "topic": "cats" }])
+chain.batch([{ "topic": "попугаи" }, { "topic": "кошки" }])
 ```
 
-In TypeScript (requires LangChain.js version 0.0.166 or later):
+Пример клиента на TypeScript (для работы клиента требуется LangChain.js версии 0.0.166 или выше):
 
 ```typescript
 import { RemoteRunnable } from "langchain/runnables/remote";
@@ -173,36 +161,36 @@ const chain = new RemoteRunnable({
   url: `http://localhost:8000/chain/invoke/`,
 });
 const result = await chain.invoke({
-  topic: "cats",
+  topic: "кошки",
 });
 ```
 
-Python using `requests`:
+Клиент, использующий Python-библиотеку `requests`:
 
 ```python
 import requests
 response = requests.post(
     "http://localhost:8000/chain/invoke/",
-    json={'input': {'topic': 'cats'}}
+    json={'input': {'topic': 'кошки'}}
 )
 response.json()
 ```
 
-You can also use `curl`:
+Использование cURL:
 
 ```sh
 curl --location --request POST 'http://localhost:8000/chain/invoke/' \
     --header 'Content-Type: application/json' \
     --data-raw '{
         "input": {
-            "topic": "cats"
+            "topic": "кошки"
         }
     }'
 ```
 
-## Endpoints
+## Эндпоинты
 
-The following code:
+С помощью примера ниже вы можете добавить на сервер заранее подготовленные эндпоинты для работы с runnable-интерфейсами:
 
 ```python
 ...
@@ -213,98 +201,95 @@ add_routes(
 )
 ```
 
-adds of these endpoints to the server:
+Список эндпоинтов:
 
-- `POST /my_runnable/invoke` - invoke the runnable on a single input
-- `POST /my_runnable/batch` - invoke the runnable on a batch of inputs
-- `POST /my_runnable/stream` - invoke on a single input and stream the output
-- `POST /my_runnable/stream_log` - invoke on a single input and stream the output, including output of intermediate steps as it's generated
-- `GET /my_runnable/input_schema` - json schema for input to the runnable
-- `GET /my_runnable/output_schema` - json schema for output of the runnable
-- `GET /my_runnable/config_schema` - json schema for config of the runnable
+- `POST /my_runnable/invoke` - вызвать runnable-интерфейс для единичных входных данных;
+- `POST /my_runnable/batch` - вызвать runnable-интерфейс для набора входных данных;
+- `POST /my_runnable/stream` - вызвать для единичных входных данных с потоковым выводом;
+- `POST /my_runnable/stream_log` - вызвать для единичных входных данных с потоковым выводом, включая вывод промежуточных шагов по ходу генерации;
+- `GET /my_runnable/input_schema` - получить json-схему входных данных runnable-интерфейса;
+- `GET /my_runnable/output_schema` - получить json-схему выходных данных runnable-интерфейса;
+- `GET /my_runnable/config_schema` - получить json-схему параметров конфигурации runnable-интерфейса;
 
-## Playground
+## Интерактивная страница
 
-You can find a playground page for your runnable at `/my_runnable/playground`. This exposes a simple UI to [configure](https://python.langchain.com/docs/expression_language/how_to/configure) and invoke your runnable with streaming output and intermediate steps.
+Интерактивная страница доступна по адресу `/my_runnable/playground`. На ней представлен простой интерфейс, который позволяет настроить параметры runnable-интерфейса и сделать запрос к нему с потоковым выводом и демонстрацией промежуточных шагов.
 
-![image](https://github.com/langchain-ai/langserve/assets/3205522/5ca56e29-f1bb-40f4-84b5-15916384a276)
+## Установка
 
-## Installation
+Для одновременной установки сервера и клиента используйте команду:
 
-For both client and server:
-
-```bash
-pip install "langserve[all]"
+```sh
+pip install "gigaserve[all]"
 ```
 
-or `pip install "langserve[client]"` for client code, and `pip install "langserve[server]"` for server code.
+Для отдельной установки сервера используйте команду:
 
-## Legacy Chains
-
-LangServe works with both Runnables (constructed via [LangChain Expression Language](https://python.langchain.com/docs/expression_language/)) and legacy chains (inheriting from `Chain`).
-However, some of the input schemas for legacy chains may be incomplete/incorrect, leading to errors.
-This can be fixed by updating the `input_schema` property of those chains in LangChain.
-If you encounter any errors, please open an issue on THIS repo, and we will work to address it.
-
-## Handling Authentication
-
-If you need to add authentication to your server,
-please reference FastAPI's [security documentation](https://fastapi.tiangolo.com/tutorial/security/)
-and [middleware documentation](https://fastapi.tiangolo.com/tutorial/middleware/).
-
-## Deployment
-
-### Deploy to GCP
-
-You can deploy to GCP Cloud Run using the following command:
-
-```
-gcloud run deploy [your-service-name] --source . --port 8001 --allow-unauthenticated --region us-central1 --set-env-vars=OPENAI_API_KEY=your_key
+```sh
+pip install "gigaserve[server]"
 ```
 
-## Pydantic
+Для отдельной установки клиента используйте команду:
 
-LangServe provides support for Pydantic 2 with some limitations.
+```sh
+pip install "gigaserve[client]"
+```
 
-1. OpenAPI docs will not be generated for invoke/batch/stream/stream_log when using Pydantic V2. Fast API does not support [mixing pydantic v1 and v2 namespaces].
-2. LangChain uses the v1 namespace in Pydantic v2. Please read the [following guidelines to ensure compatibility with LangChain](https://github.com/langchain-ai/langchain/discussions/9337)
+## Работа со устаревшими цепочками
 
-Except for these limitations, we expect the API endpoints, the playground and any other features to work as expected. 
+GigaServe работает как с runnable-интерфейсами(написанным с помощью constructed via [LangChain Expression Language](https://python.langchain.com/docs/expression_language/)), так и с устаревшими цепочками (посредством наследования от `Chain`). Но следует учиывать, что некоторые входные схемы для устаревших цепочек могут быть некорректными или неполными и могут вызывать ошибки. Это можно предотвратить, если обновить аттрибут `input_schema` таких цепочек в LangChain.
 
-## Advanced
+## Добавление аутентификации
 
-### Files
+О том как добавить аутентификацию на свой сервер GigaServe вы может узнать в разделах документации FastAPI, посвященных [безопасности](https://fastapi.tiangolo.com/tutorial/security/) и [использованию связующего ПО](https://fastapi.tiangolo.com/tutorial/middleware/).
 
-LLM applications often deal with files. There are different architectures
-that can be made to implement file processing; at a high level:
+## Развертывание
 
-1. The file may be uploaded to the server via a dedicated endpoint and processed using a separate endpoint
-2. The file may be uploaded by either value (bytes of file) or reference (e.g., s3 url to file content)
-3. The processing endpoint may be blocking or non-blocking
-4. If significant processing is required, the processing may be offloaded to a dedicated process pool
+### Развертывание на GCP
 
-You should determine what is the appropriate architecture for your application.
+Для развертывания на GCP Cloud Run используйте команду:
 
-Currently, to upload files by value to a runnable, use base64 encoding for the 
-file (`multipart/form-data` is not supported yet). 
+```
+gcloud run deploy [your-service-name] --source . --port 8001 --allow-unauthenticated --region us-central1 --set-env-vars=GIGACHAT_API_KEY=your_key
+```
 
-Here's an [example](https://github.com/langchain-ai/langserve/tree/main/examples/file_processing) that shows
-how to use base64 encoding to send a file to a remote runnable.
+## Работа с Pydantic
 
-Remember, you can always upload files by reference (e.g., s3 url) or upload them as
-multipart/form-data to a dedicated endpoint.
+GigaServe поддерживает Pydantic 2 с некоторыми ограничениями:
 
-### Custom Input and Output Types
+- При использовании Pydantic V2 документация OpenAPI не генерируется. Это связанно с тем, что Fast API не поддерживает [смешивание пространств имен pydantic v1 и v2](https://github.com/tiangolo/fastapi/issues/10360).
+- GigaChain использует пространство имен версии v1 в Pydantic v2.
 
-Input and Output types are defined on all runnables.
+За исключением указанных ограничений эндпоинты API, интерактивная страница и другие функции должны работать корректно.
 
-You can access them via the `input_schema` and `output_schema` properties.
+## Дополнительные возможности
 
-`LangServe` uses these types for validation and documentation.
+### Работа с файлами
 
-If you want to override the default inferred types, you can use the `with_types` method.
+Обработка файлов это типичная задача для больших языковых моделей.
+Существуют различные архитектурные подходы для решения этой задачи:
 
-Here's a toy example to illustrate the idea:
+- Файл может быть загружен на сервер с помощью выделенного эндпоинта и обработан с помощью отдельного эндпоинта
+- Файл может быть представлен как в виде бинарного значения, так и в виде ссылки, например, на содержимое файла, размещенное на хранилище s3.
+- Эндпоинт может блокирующим или неблокирующим.
+- Сложную обработку можно выделить в отдельный пул процессов. 
+
+Выбирайте подход в соответсвии со своими задачами.
+
+GigaServe пока не поддерживает тип `multipart/form-data`.
+Для загрузки бинарного значения файла в runnable-интерфейс используйте кодировку base64.
+
+[Пример загрузки файла закодированного с помощью base64](https://github.com/ai-forever/gigaserve/tree/main/examples/file_processing).
+
+Вы также можете загружать файлы с помощью ссылок (например, на хранилище s3) или загружать их на отдельный эндпоинт как `multipart/form-data`
+
+### Настраиваемые типы входных и выходных данных
+
+Типы входных и выходных данных определяются для всех runnable-интерфейсов. Они доступны в аттрибутах `input_schema` и `output_schema`. GigaServe использует эти типы для валидации данных и генерации документации.
+
+Вы можете переопределить наследованные типы с помощью метода `with_types`.
+
+Общий пример работы с типами:
 
 ```python
 from typing import Any
@@ -316,7 +301,7 @@ app = FastAPI()
 
 
 def func(x: Any) -> int:
-    """Mistyped function that should accept an int but accepts anything."""
+    """Ошибочно заданная функция, которая принимает любые данные, хотя должна принимать int."""
     return x + 1
 
 
@@ -327,15 +312,11 @@ runnable = RunnableLambda(func).with_types(
 add_routes(app, runnable)
 ```
 
-### Custom User Types
+### Пользовательские типы
 
-Inherit from `CustomUserType` if you want the data to de-serialize into a 
-pydantic model rather than the equivalent dict representation.
+Для десериализации данных в виде pydantic-модели, а не `dict`, унаследуйтесь от `CustomUserType`. При наследовании от этого типа сервер будет не будет преобразовывать данные в `dict`, а будет сохранять их как pydantic-модель.
 
-At the moment, this type only works *server* side and is used
-to specify desired *decoding* behavior. If inheriting from this type
-the server will keep the decoded type as a pydantic model instead
-of converting it into a dict.
+В настоящее время этот тип работает только на стороне сервера и определяет поведение при декодировании данных.
 
 ```python
 from fastapi import FastAPI
@@ -352,47 +333,46 @@ class Foo(CustomUserType):
 
 
 def func(foo: Foo) -> int:
-    """Sample function that expects a Foo type which is a pydantic model"""
+    """Пример функции, которая ожидает тип Foo, представленный в виде моде pydantic model"""
     assert isinstance(foo, Foo)
     return foo.bar
 
-# Note that the input and output type are automatically inferred!
-# You do not need to specify them.
-# runnable = RunnableLambda(func).with_types( # <-- Not needed in this case
+# Обратите внимание, что входные и выходные типы наследуются автоматически!
+# Вам не нужно их указывать
+# runnable = RunnableLambda(func).with_types( # <-- Не нужно в данном случае
 #     input_schema=Foo,
 #     output_schema=int,
 # 
 add_routes(app, RunnableLambda(func), path="/foo")
 ```
 
-### Playground Widgets
+### Виджеты интерактивной страницы
 
-The playground allows you to define custom widgets for your runnable from the backend.
+На интерактивной странице вы можете создавать различные виджеты, демонстрирующие работу runnable-интерфейсов вашего бекенда.
 
-- A widget is specified at the field level and shipped as part of the JSON schema of the input type
-- A widget must contain a key called `type` with the value being one of a well known list of widgets
-- Other widget keys will be associated with values that describe paths in a JSON object
+- Виджет задается на уровне поля и поставляется как часть JSON-схемы вводного типа.
+- Виджет должен содержать ключ `type`, значением которого является один из известного списка виджетов
+- Другие ключи виджета будут связаны со значениями, описывающими пути в JSON-объекте
 
-General schema:
+Общая схема:
 
 ```typescript
 type JsonPath = number | string | (number | string)[];
-type NameSpacedPath = { title: string; path: JsonPath }; // Using title to mimick json schema, but can use namespace
+type NameSpacedPath = { title: string; path: JsonPath }; // title используется для имитации json-схемы,но можно использовать namespace
 type OneOfPath = { oneOf: JsonPath[] };
 
 type Widget = {
-    type: string // Some well known type (e.g., base64file, chat etc.)
+    type: string // Какой-то хорошо известный тип, например, base64file, chat и др.
     [key: string]: JsonPath | NameSpacedPath | OneOfPath;
 };
 ```
 
 
-#### File Upload Widget
+#### Виджет загрузки файла
 
-Allows creation of a file upload input in the UI playground for files
-that are uploaded as base64 encoded strings. Here's the full [example](https://github.com/langchain-ai/langserve/tree/main/examples/file_processing).
+Виджет позволяет загружать файлы в интерфейсе интерактивной страницы. Работает для файлов, представленных в виде строки, закодированной в base64.
 
-Snippet:
+Фрагмент примера:
 
 ```python
 try:
@@ -403,13 +383,16 @@ except ImportError:
 from langserve import CustomUserType
 
 
-# ATTENTION: Inherit from CustomUserType instead of BaseModel otherwise
-#            the server will decode it into a dict instead of a pydantic model.
+# ВНИМАНИЕ: Наследуйтесь от CustomUserType, а не от BaseModel. В противном случае
+#            сервер декодирует данные в dict, а не модель pydantic.
 class FileProcessingRequest(CustomUserType):
     """Request including a base64 encoded file."""
 
-    # The extra field is used to specify a widget for the playground UI.
+    # Дополнительное поле используется, чтобы задать виджет в интерфейсе интерактивной страницы.
     file: str = Field(..., extra={"widget": {"type": "base64file"}})
     num_chars: int = 100
 
 ```
+
+> [!NOTE]
+> [Подробный пример загрузки файла](https://github.com/ai-forever/gigaserve/tree/main/examples/file_processing).
