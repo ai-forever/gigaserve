@@ -36,6 +36,18 @@
 ## GigaChain CLI 🛠️
 
 Для быстрой настройки проекта GigaChain используйте актуальную версию GigaChain CLI:
+* Vulnerability in Versions 0.0.13 - 0.0.15 -- playground endpoint allows accessing arbitrary files on server. [Resolved in 0.0.16](https://github.com/langchain-ai/langserve/pull/98).
+ 
+## Установка
+
+Для клиента и сервера
+
+```bash
+pip install "gigaserve[all]"
+```
+
+или `pip install "gigaserve[client]"` для установки клиента и `pip gigaserve "langserve[server]"` для установки сервера.
+
 
 ```sh
 gigachain app new ../path/to/directory
@@ -89,7 +101,7 @@ prompt = ChatPromptTemplate.from_template("расскажи шутку о {topic
 add_routes(
     app,
     prompt | model,
-    path="/chain",
+    path="/joke",
 )
 
 if __name__ == "__main__":
@@ -102,12 +114,14 @@ if __name__ == "__main__":
 
 Сгенерированная OpenAPI-документация к серверу, развернутому с помощью предыдущего примера, доступна по адресу:
 
+> ⚠️ If using pydantic v2, docs will not be generated for invoke/batch/stream/stream_log. See [Pydantic](#pydantic) section below for more details.
+
 ```sh
 curl localhost:8000/docs
 ```
 
 > [!NOTE]
-> Обращение к адресу `localhost:8000` будет возвращать ошибку 404, пока вы не определите `@app.get("/")`.
+> ⚠️ Обращение к адресу `localhost:8000` будет возвращать ошибку 404 **by design**, пока вы не определите `@app.get("/")`.
 
 ### Клиент
 
@@ -121,7 +135,7 @@ from langserve import RemoteRunnable
 
 openai = RemoteRunnable("http://localhost:8000/openai/")
 anthropic = RemoteRunnable("http://localhost:8000/anthropic/")
-joke_chain = RemoteRunnable("http://localhost:8000/chain/")
+joke_chain = RemoteRunnable("http://localhost:8000/joke/")
 
 # Синхронный вызов
 
@@ -158,7 +172,7 @@ chain.batch([{ "topic": "попугаи" }, { "topic": "кошки" }])
 import { RemoteRunnable } from "langchain/runnables/remote";
 
 const chain = new RemoteRunnable({
-  url: `http://localhost:8000/chain/invoke/`,
+  url: `http://localhost:8000/joke/`,
 });
 const result = await chain.invoke({
   topic: "кошки",
@@ -170,7 +184,7 @@ const result = await chain.invoke({
 ```python
 import requests
 response = requests.post(
-    "http://localhost:8000/chain/invoke/",
+    "http://localhost:8000/joke/invoke/",
     json={'input': {'topic': 'кошки'}}
 )
 response.json()
@@ -179,7 +193,7 @@ response.json()
 Использование cURL:
 
 ```sh
-curl --location --request POST 'http://localhost:8000/chain/invoke/' \
+curl --location --request POST 'http://localhost:8000/joke/invoke/' \
     --header 'Content-Type: application/json' \
     --data-raw '{
         "input": {
@@ -211,33 +225,37 @@ add_routes(
 - `GET /my_runnable/output_schema` - получить json-схему выходных данных runnable-интерфейса;
 - `GET /my_runnable/config_schema` - получить json-схему параметров конфигурации runnable-интерфейса;
 
-## Интерактивная страница
+## Playground
 
-Интерактивная страница доступна по адресу `/my_runnable/playground`. На ней представлен простой интерфейс, который позволяет настроить параметры runnable-интерфейса и сделать запрос к нему с потоковым выводом и демонстрацией промежуточных шагов.
+Playground доступен по адресу `/my_runnable/playground`. На ней представлен простой интерфейс, который позволяет настроить параметры runnable-интерфейса и сделать запрос к нему с потоковым выводом и демонстрацией промежуточных шагов.
 
-## Установка
+Эти адреса соответствуют [LangChain Expression Language interface (LCEL)](https://python.langchain.com/docs/expression_language/interface) -- обратитесь к документации за более подробными деталями
 
-Для одновременной установки сервера и клиента используйте команду:
+<p align="center">
+<img src="https://github.com/langchain-ai/langserve/assets/3205522/5ca56e29-f1bb-40f4-84b5-15916384a276" width="50%"/>
+</p>
 
-```sh
-pip install "gigaserve[all]"
-```
+### Виджеты
 
-Для отдельной установки сервера используйте команду:
+Playground поддерживает [виджеты](#playground-widgets) и может использоваться для тестирования ваших цепочек с разными входными данными.
 
-```sh
-pip install "gigaserve[server]"
-```
+# In addition, for configurable runnables, the playground will allow you to configure the runnable and share a link with the configuration:
+В завершении, для настраиваемых цепочек, playground позволяет настроить цепочку и поделиться ссылкой на конфигурацию:
 
-Для отдельной установки клиента используйте команду:
+### Sharing
+
+<p align="center">
+<img src="https://github.com/langchain-ai/langserve/assets/3205522/86ce9c59-f8e4-4d08-9fa3-62030e0f521d" width="50%"/>
+</p>
+
 
 ```sh
 pip install "gigaserve[client]"
 ```
 
-## Работа со устаревшими цепочками
+## Работа с классическими цепочками
 
-GigaServe работает как с runnable-интерфейсами(написанным с помощью constructed via [LangChain Expression Language](https://python.langchain.com/docs/expression_language/)), так и с устаревшими цепочками (посредством наследования от `Chain`). Но следует учиывать, что некоторые входные схемы для устаревших цепочек могут быть некорректными или неполными и могут вызывать ошибки. Это можно предотвратить, если обновить аттрибут `input_schema` таких цепочек в LangChain.
+GigaServe работает как с runnable-интерфейсами(написанным с помощью constructed via [LangChain Expression Language](https://python.langchain.com/docs/expression_language/)), так и с классическими цепочками (посредством наследования от `Chain`). Но следует учиывать, что некоторые входные схемы для устаревших цепочек могут быть некорректными или неполными и могут вызывать ошибки. Это можно предотвратить, если обновить аттрибут `input_schema` таких цепочек в LangChain.
 
 ## Добавление аутентификации
 
@@ -263,6 +281,12 @@ GigaServe поддерживает Pydantic 2 с некоторыми огран
 За исключением указанных ограничений эндпоинты API, интерактивная страница и другие функции должны работать корректно.
 
 ## Дополнительные возможности
+
+### Handling Authentication
+
+Если вам нужна дополнительная аутентификация для вашего сервер,
+пожалуйста обратитесь к документации FastAPI [security documentation](https://fastapi.tiangolo.com/tutorial/security/)
+и [middleware documentation](https://fastapi.tiangolo.com/tutorial/middleware/).
 
 ### Работа с файлами
 
@@ -396,3 +420,7 @@ class FileProcessingRequest(CustomUserType):
 
 > [!NOTE]
 > [Подробный пример загрузки файла](https://github.com/ai-forever/gigaserve/tree/main/examples/file_processing).
+
+<p align="center">
+<img src="https://github.com/langchain-ai/langserve/assets/3205522/52199e46-9464-4c2e-8be8-222250e08c3f" width="50%"/>
+</p>

@@ -33,7 +33,7 @@ lint_diff format_diff: PYTHON_FILES=$(shell git diff --relative=. --name-only --
 
 lint lint_diff:
 	poetry run ruff .
-	poetry run ruff format $(PYTHON_FILES) --check
+	poetry run ruff format $(PYTHON_FILES) --diff
 
 format format_diff:
 	poetry run ruff format $(PYTHON_FILES)

@@ -34,18 +34,20 @@ from langchain.load.serializable import Serializable
 from langchain.schema.runnable import Runnable, RunnableConfig
 from langchain.schema.runnable.config import get_config_list, merge_configs
 from langsmith import client as ls_client
-from langsmith.utils import LangSmithNotFoundError, tracing_is_enabled
+from langsmith.utils import tracing_is_enabled
 from typing_extensions import Annotated
-
-try:
-    from pydantic.v1 import BaseModel, Field, ValidationError, create_model
-except ImportError:
-    from pydantic import BaseModel, Field, ValidationError, create_model
 
 from langserve.callbacks import AsyncEventAggregatorCallback, CallbackEventDict
 from langserve.lzstring import LZString
 from langserve.playground import serve_playground
-from langserve.pydantic_v1 import _PYDANTIC_MAJOR_VERSION
+from langserve.pydantic_v1 import (
+    _PYDANTIC_MAJOR_VERSION,
+    PYDANTIC_VERSION,
+    BaseModel,
+    Field,
+    ValidationError,
+    create_model,
+)
 from langserve.schema import (
     BatchResponseMetadata,
     CustomUserType,
@@ -275,6 +277,7 @@ _APP_TO_PATHS = weakref.WeakKeyDictionary()
 def _setup_global_app_handlers(app: Union[FastAPI, APIRouter]) -> None:
     @app.on_event("startup")
     async def startup_event():
+        # ruff: noqa: E501
         GIGASERVE = """
   _______  __    _______      ___           _______. _______ .______     ____    ____  _______ 
  /  _____||  |  /  _____|    /   \         /       ||   ____||   _  \    \   \  /   / |   ____|
@@ -306,11 +309,15 @@ def _setup_global_app_handlers(app: Union[FastAPI, APIRouter]) -> None:
 
         if _PYDANTIC_MAJOR_VERSION == 2:
             print()
-            print(f'{orange("OpenAPI Docs:")} ', end="")
+            print(f'{orange("GIGASERVE:")} ', end="")
             print(
-                "Running with pydantic >= 2: OpenAPI docs for "
-                "invoke/batch/stream/stream_log` endpoints will not be "
-                "generated; but, API endpoints and playground will work as expected."
+                f"⚠️ Using pydantic {PYDANTIC_VERSION}. "
+                f"OpenAPI docs for invoke, batch, stream, stream_log "
+                f"endpoints will not be generated. API endpoints and playground "
+                f"should work as expected. "
+                f"If you need to see the docs, you can downgrade to pydantic 1. "
+                "For example, `pip install pydantic==1.10.13`. "
+                f"See https://github.com/tiangolo/fastapi/issues/10360 for details."
             )
         print()
 
@@ -525,16 +532,46 @@ def add_routes(
     if hasattr(app, "openapi_tags") and (path or (app not in _APP_SEEN)):
         if not path:
             _APP_SEEN.add(app)
+
+        if _PYDANTIC_MAJOR_VERSION == 1:
+            # Documentation for the default endpoints
+            default_endpoint_tags = {
+                "name": route_tags[0] if route_tags else "default",
+            }
+        elif _PYDANTIC_MAJOR_VERSION == 2:
+            # When using pydantic v2, we cannot generate openapi docs for
+            # the invoke/batch/stream/stream_log endpoints since the underlying
+            # models are from the pydantic.v1 namespace and cannot be supported
+            # by fastapi's.
+            # https://github.com/tiangolo/fastapi/issues/10360
+            default_endpoint_tags = {
+                "name": route_tags[0] if route_tags else "default",
+                "description": (
+                    f"⚠️ Using pydantic {PYDANTIC_VERSION}. "
+                    f"OpenAPI docs for `invoke`, `batch`, `stream`, `stream_log` "
+                    f"endpoints will not be generated. API endpoints and playground "
+                    f"should work as expected. "
+                    f"If you need to see the docs, you can downgrade to pydantic 1. "
+                    "For example, `pip install pydantic==1.10.13`"
+                    f"See https://github.com/tiangolo/fastapi/issues/10360 for details."
+                ),
+            }
+        else:
+            raise AssertionError(
+                f"Expected pydantic major version 1 or 2, got {_PYDANTIC_MAJOR_VERSION}"
+            )
+
         app.openapi_tags = [
             *(getattr(app, "openapi_tags", []) or []),
-            {
-                "name": route_tags[0] if route_tags else "default",
-            },
+            default_endpoint_tags,
             {
                 "name": route_tags_with_config[0],
                 "description": (
                     "Endpoints with a default configuration "
-                    "set by `config_hash` path parameter."
+                    "set by `config_hash` path parameter. "
+                    "Used in conjunction with share links generated using the "
+                    "GigaServe UI playground. "
+                    "The hash is an LZString compressed JSON string."
                 ),
             },
         ]
@@ -1025,11 +1062,17 @@ def add_routes(
                 request=request,
                 per_req_config_modifier=per_req_config_modifier,
             )
+
+        if isinstance(app, FastAPI):  # type: ignore
+            base_url = f"{namespace}/playground"
+        else:
+            base_url = f"{app.prefix}{namespace}/playground"
+
         return await serve_playground(
             runnable.with_config(config),
             runnable.with_config(config).input_schema,
             config_keys,
-            f"{namespace}/playground",
+            base_url,
             file_path,
         )
 
@@ -1037,37 +1080,30 @@ def add_routes(
     async def feedback(feedback_create_req: FeedbackCreateRequest) -> Feedback:
         """
         Send feedback on an individual run to langsmith
+
+        Note that a successful response means that feedback was successfully
+        submitted. It does not guarantee that the feedback is recorded by
+        langsmith. Requests may be silently rejected if they are
+        unauthenticated or invalid by the server.
         """
 
         if not tracing_is_enabled() or not enable_feedback_endpoint:
             raise HTTPException(
                 400,
                 "The feedback endpoint is only accessible when LangSmith is "
-                + "enabled on your LangServe server.",
+                + "enabled on your GigaServe server.",
             )
 
-        try:
-            feedback_from_langsmith = langsmith_client.create_feedback(
-                feedback_create_req.run_id,
-                feedback_create_req.key,
-                score=feedback_create_req.score,
-                value=feedback_create_req.value,
-                comment=feedback_create_req.comment,
-                source_info={
-                    "from_langserve": True,
-                },
-                # We execute eagerly, meaning we confirm the run exists in
-                # LangSmith before returning a response to the user. This ensures
-                # that clients of the UI know that the feedback was successfully
-                # recorded before they receive a 200 response
-                eager=True,
-                # We lower the number of attempts to 3 to ensure we have time
-                # to wait for a run to show up, but do not take forever in cases
-                # of bad input
-                stop_after_attempt=3,
-            )
-        except LangSmithNotFoundError:
-            raise HTTPException(404, "No run with the given run_id exists")
+        feedback_from_langsmith = langsmith_client.create_feedback(
+            feedback_create_req.run_id,
+            feedback_create_req.key,
+            score=feedback_create_req.score,
+            value=feedback_create_req.value,
+            comment=feedback_create_req.comment,
+            source_info={
+                "from_langserve": True,
+            },
+        )
 
         # We purposefully select out fields from langsmith so that we don't
         # fail validation if langsmith adds extra fields. We prefer this over
@@ -1095,6 +1131,13 @@ def add_routes(
             response_model=InvokeResponse,
             tags=route_tags_with_config,
             name=_route_name_with_config("invoke"),
+            description=(
+                "This endpoint is to be used with share links generated by the "
+                "GigaServe playground. "
+                "The hash is an LZString compressed JSON string. "
+                "For regular use cases, use the /invoke endpoint without "
+                "the `c/{config_hash}` path parameter."
+            ),
         )
         @app.post(
             f"{namespace}/invoke",
@@ -1114,6 +1157,13 @@ def add_routes(
             response_model=BatchResponse,
             tags=route_tags_with_config,
             name=_route_name_with_config("batch"),
+            description=(
+                "This endpoint is to be used with share links generated by the "
+                "GigaServe playground. "
+                "The hash is an LZString compressed JSON string. "
+                "For regular use cases, use the /batch endpoint without "
+                "the `c/{config_hash}` path parameter."
+            ),
         )
         @app.post(
             f"{namespace}/batch",
@@ -1133,6 +1183,13 @@ def add_routes(
             include_in_schema=True,
             tags=route_tags_with_config,
             name=_route_name_with_config("stream"),
+            description=(
+                "This endpoint is to be used with share links generated by the "
+                "GigaServe playground. "
+                "The hash is an LZString compressed JSON string. "
+                "For regular use cases, use the /stream endpoint without "
+                "the `c/{config_hash}` path parameter."
+            ),
         )
         @app.post(
             f"{namespace}/stream",
@@ -1192,6 +1249,13 @@ def add_routes(
             include_in_schema=True,
             tags=route_tags_with_config,
             name=_route_name_with_config("stream_log"),
+            description=(
+                "This endpoint is to be used with share links generated by the "
+                "GigaServe playground. "
+                "The hash is an LZString compressed JSON string. "
+                "For regular use cases, use the /stream_log endpoint without "
+                "the `c/{config_hash}` path parameter."
+            ),
         )
         @app.post(
             f"{namespace}/stream_log",
