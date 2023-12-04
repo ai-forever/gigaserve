@@ -27,15 +27,15 @@ from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 from typing_extensions import TypedDict
 
-from langserve import server
+from langserve import api_handler
+from langserve.api_handler import (
+    _rename_pydantic_model,
+    _replace_non_alphanumeric_with_underscores,
+)
 from langserve.callbacks import AsyncEventAggregatorCallback
 from langserve.client import RemoteRunnable
 from langserve.lzstring import LZString
 from langserve.schema import CustomUserType
-from langserve.server import (
-    _rename_pydantic_model,
-    _replace_non_alphanumeric_with_underscores,
-)
 
 try:
     from pydantic.v1 import BaseModel, Field
@@ -911,7 +911,7 @@ async def test_input_validation(
         assert "metadata" in config_seen
         assert "a" not in config_seen["metadata"]
         assert "__useragent" in config_seen["metadata"]
-        assert "__gigaserve_version" in config_seen["metadata"]
+        assert "__langserve_version" in config_seen["metadata"]
         assert "__langserve_endpoint" in config_seen["metadata"]
         assert config_seen["metadata"]["__langserve_endpoint"] == "invoke"
 
@@ -925,7 +925,7 @@ async def test_input_validation(
         assert config_seen["tags"] == ["test"]
         assert config_seen["metadata"]["a"] == 5
         assert "__useragent" in config_seen["metadata"]
-        assert "__gigaserve_version" in config_seen["metadata"]
+        assert "__langserve_version" in config_seen["metadata"]
         assert "__langserve_endpoint" in config_seen["metadata"]
         assert config_seen["metadata"]["__langserve_endpoint"] == "invoke"
 
@@ -1071,7 +1071,7 @@ async def test_openapi_docs_with_identical_runnables(
 
 
 async def test_configurable_runnables(event_loop: AbstractEventLoop) -> None:
-    """Add tests for using gigachain's configurable runnables"""
+    """Add tests for using langchain's configurable runnables"""
 
     template = PromptTemplate.from_template("say {name}").configurable_fields(
         template=ConfigurableField(
@@ -1165,8 +1165,8 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
     # TODO(Fix me): need to fix handling of global state -- we get problems
     # gives inconsistent results when running multiple tests / results
     # depending on ordering
-    server._SEEN_NAMES = set()
-    server._MODEL_REGISTRY = {}
+    api_handler._SEEN_NAMES = set()
+    api_handler._MODEL_REGISTRY = {}
 
     async def add_one(x: int) -> int:
         """Add one to simulate a valid function"""
@@ -1232,7 +1232,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
         assert response.json() == {"title": "RunnableBindingOutput", "type": "number"}
 
         # Just verify that the schema is not empty (it's pretty long)
-        # and the actual value should be tested in GigaChain
+        # and the actual value should be tested in LangChain
         response = await async_client.get("/prompt_1/output_schema")
         assert response.json() != {}  # Long string
 
@@ -1564,8 +1564,8 @@ async def test_batch_returns_run_id(app: FastAPI) -> None:
 async def test_feedback_succeeds_when_langsmith_enabled() -> None:
     """Tests that the feedback endpoint can accept feedback to langsmith."""
 
-    with patch("langserve.server.ls_client") as mocked_ls_client_package:
-        with patch("langserve.server.tracing_is_enabled") as tracing_is_enabled:
+    with patch("langserve.api_handler.ls_client") as mocked_ls_client_package:
+        with patch("langserve.api_handler.tracing_is_enabled") as tracing_is_enabled:
             tracing_is_enabled.return_value = True
             mocked_client = MagicMock(return_value=None)
             mocked_ls_client_package.Client.return_value = mocked_client
