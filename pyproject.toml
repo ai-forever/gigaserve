@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "gigaserve"
-version = "0.0.29"
+version = "0.0.32"
 description = ""
 readme = "README.md"
 authors = ["LangChain", "GigaChain"]
@@ -97,5 +97,6 @@ build-backend = "poetry.core.masonry.api"
 #                       section of the configuration file raise errors.
 addopts = "--strict-markers --strict-config --durations=5 -vv"
 # Global timeout for all tests. There shuold be a good reason for a test to
-# take more than 5 second
+# take more than 5 seconds
 timeout = 5
+asyncio_mode = "auto"

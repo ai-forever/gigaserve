@@ -257,6 +257,18 @@ pip install "gigaserve[client]"
 
 GigaServe работает как с runnable-интерфейсами(написанным с помощью constructed via [LangChain Expression Language](https://python.langchain.com/docs/expression_language/)), так и с классическими цепочками (посредством наследования от `Chain`). Но следует учиывать, что некоторые входные схемы для устаревших цепочек могут быть некорректными или неполными и могут вызывать ошибки. Это можно предотвратить, если обновить аттрибут `input_schema` таких цепочек в LangChain.
 
+### Deploy to Azure 
+
+You can deploy to Azure using Azure Container Apps (Serverless):
+
+```
+az containerapp up --name [container-app-name] --source . --resource-group [resource-group-name] --environment  [environment-name] --ingress external --target-port 8001 --env-vars=OPENAI_API_KEY=your_key  
+```
+
+You can find more info [here](https://learn.microsoft.com/en-us/azure/container-apps/containerapp-up)
+
+### Deploy to GCP
+
 ## Добавление аутентификации
 
 О том как добавить аутентификацию на свой сервер GigaServe вы может узнать в разделах документации FastAPI, посвященных [безопасности](https://fastapi.tiangolo.com/tutorial/security/) и [использованию связующего ПО](https://fastapi.tiangolo.com/tutorial/middleware/).
