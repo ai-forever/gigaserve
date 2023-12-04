@@ -52,7 +52,7 @@ def _setup_global_app_handlers(app: Union[FastAPI, APIRouter]) -> None:
 |  | |_ | |  | |  | |_ |   /  /_\  \       \   \    |   __|  |      /      \      /   |   __|  
 |  |__| | |  | |  |__| |  /  _____  \  .----)   |   |  |____ |  |\  \----.  \    /    |  |____ 
  \______| |__|  \______| /__/     \__\ |_______/    |_______|| _| `._____|   \__/     |_______|
-""" # ruff: noqa: E501
+""" # noqa: E501
 
         def green(text: str) -> str:
             """Return the given text in green."""
