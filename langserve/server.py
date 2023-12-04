@@ -45,8 +45,7 @@ _APP_TO_PATHS = weakref.WeakKeyDictionary()
 def _setup_global_app_handlers(app: Union[FastAPI, APIRouter]) -> None:
     @app.on_event("startup")
     async def startup_event():
-        # ruff: noqa: E501
-        GIGASERVE = """
+        GIGASERVE = r"""
   _______  __    _______      ___           _______. _______ .______     ____    ____  _______ 
  /  _____||  |  /  _____|    /   \         /       ||   ____||   _  \    \   \  /   / |   ____|
 |  |  __  |  | |  |  __     /  ^  \       |   (----`|  |__   |  |_)  |    \   \/   /  |  |__   
