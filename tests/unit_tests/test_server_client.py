@@ -249,7 +249,7 @@ def test_server(app: FastAPI) -> None:
 
     output_schema = sync_client.get("/config_schema").json()
     assert isinstance(output_schema, dict)
-    assert output_schema["title"] == "RunnableBindingConfig"
+    assert output_schema["title"] == "RunnableLambdaConfig"
 
     # TODO(Team): Fix test. Issue with eventloops right now when using sync client
     # # Test stream
@@ -657,7 +657,7 @@ async def test_astream_log_diff_no_effect(
         ],
         [
             {"op": "add", "path": "/streamed_output/-", "value": 2},
-            {"op": "replace", "path": "/final_output", "value": 2},
+            {"op": "replace", "path": "/final_output", "value": {"output: 2"}},
         ],
     ]
     assert _get_run_log(run_logs).state == {
@@ -725,7 +725,7 @@ async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
             ],
             [
                 {"op": "add", "path": "/streamed_output/-", "value": 2},
-                {"op": "replace", "path": "/final_output", "value": 2},
+                {"op": "replace", "path": "/final_output", "value": {"output: 2"}},
             ],
         ]
 
