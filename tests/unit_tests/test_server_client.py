@@ -5,7 +5,7 @@ import json
 from asyncio import AbstractEventLoop
 from contextlib import asynccontextmanager, contextmanager
 from enum import Enum
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Union
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -15,7 +15,7 @@ import pytest_asyncio
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
-from langchain.callbacks.tracers.log_stream import RunLogPatch
+from langchain.callbacks.tracers.log_stream import RunLog, RunLogPatch
 from langchain.prompts import PromptTemplate
 from langchain.prompts.base import StringPromptValue
 from langchain.schema.messages import HumanMessage, SystemMessage
@@ -103,7 +103,7 @@ def app(event_loop: AbstractEventLoop) -> FastAPI:
     """A simple server that wraps a Runnable and exposes it as an API."""
 
     async def add_one_or_passthrough(
-        x: Union[int, HumanMessage]
+        x: Union[int, HumanMessage],
     ) -> Union[int, HumanMessage]:
         """Add one to int or passthrough."""
         if isinstance(x, int):
@@ -249,7 +249,7 @@ def test_server(app: FastAPI) -> None:
 
     output_schema = sync_client.get("/config_schema").json()
     assert isinstance(output_schema, dict)
-    assert output_schema["title"] == "RunnableLambdaConfig"
+    assert output_schema["title"] == "RunnableBindingConfig"
 
     # TODO(Team): Fix test. Issue with eventloops right now when using sync client
     # # Test stream
@@ -582,7 +582,7 @@ async def test_astream(async_remote_runnable: RemoteRunnable) -> None:
     app = FastAPI()
 
     async def add_one_or_passthrough(
-        x: Union[int, HumanMessage]
+        x: Union[int, HumanMessage],
     ) -> Union[int, HumanMessage]:
         """Add one to int or passthrough."""
         if isinstance(x, int):
@@ -622,6 +622,14 @@ async def test_astream(async_remote_runnable: RemoteRunnable) -> None:
         assert outputs == [data]
 
 
+def _get_run_log(run_log_patches: Sequence[RunLogPatch]) -> RunLog:
+    """Get run log"""
+    run_log = RunLog(state=None)  # type: ignore
+    for log_patch in run_log_patches:
+        run_log = run_log + log_patch
+    return run_log
+
+
 async def test_astream_log_diff_no_effect(
     async_remote_runnable: RemoteRunnable,
 ) -> None:
@@ -640,16 +648,24 @@ async def test_astream_log_diff_no_effect(
                 "op": "replace",
                 "path": "",
                 "value": {
-                    "final_output": {"output": 2},
+                    "final_output": None,
                     "id": uuid,
                     "logs": {},
                     "streamed_output": [],
                 },
             }
         ],
-        [{"op": "replace", "path": "/final_output", "value": {"output": 2}}],
-        [{"op": "add", "path": "/streamed_output/-", "value": 2}],
+        [
+            {"op": "add", "path": "/streamed_output/-", "value": 2},
+            {"op": "replace", "path": "/final_output", "value": 2},
+        ],
     ]
+    assert _get_run_log(run_logs).state == {
+        "final_output": 2,
+        "id": uuid,
+        "logs": {},
+        "streamed_output": [2],
+    }
 
 
 async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
@@ -700,16 +716,109 @@ async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
                     "op": "replace",
                     "path": "",
                     "value": {
-                        "final_output": {"output": 2},
+                        "final_output": None,
                         "id": uuid,
                         "logs": {},
                         "streamed_output": [],
                     },
                 }
             ],
-            [{"op": "replace", "path": "/final_output", "value": {"output": 2}}],
-            [{"op": "add", "path": "/streamed_output/-", "value": 2}],
+            [
+                {"op": "add", "path": "/streamed_output/-", "value": 2},
+                {"op": "replace", "path": "/final_output", "value": 2},
+            ],
         ]
+
+        assert _get_run_log(run_log_patches).state == {
+            "final_output": 2,
+            "id": uuid,
+            "logs": {},
+            "streamed_output": [2],
+        }
+
+
+@pytest.mark.asyncio
+async def test_astream_log_allowlist(event_loop: AbstractEventLoop) -> None:
+    """Test async stream with an allowlist."""
+
+    async def add_one(x: int) -> int:
+        """Add one to simulate a valid function"""
+        return x + 1
+
+    app = FastAPI()
+    add_routes(
+        app,
+        RunnableLambda(add_one).with_config({"run_name": "allowed"}),
+        path="/empty_allowlist",
+        input_type=int,
+        stream_log_name_allow_list=[],
+    )
+    add_routes(
+        app,
+        RunnableLambda(add_one).with_config({"run_name": "allowed"}),
+        input_type=int,
+        path="/allowlist",
+        stream_log_name_allow_list=["allowed"],
+    )
+
+    # Invoke request
+    async with get_async_remote_runnable(app, path="/empty_allowlist/") as runnable:
+        run_log_patches = []
+
+        async for chunk in runnable.astream_log(1):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) == 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_tags=[]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) == 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_types=[]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) == 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_names=[]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) == 0
+
+    async with get_async_remote_runnable(app, path="/allowlist/") as runnable:
+        run_log_patches = []
+
+        async for chunk in runnable.astream_log(1):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) > 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_tags=[]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) > 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_types=[]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) > 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_names=[]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) > 0
+
+        run_log_patches = []
+        async for chunk in runnable.astream_log(1, include_names=["allowed"]):
+            run_log_patches.append(chunk)
+
+        assert len(run_log_patches) > 0
 
 
 def test_invoke_as_part_of_sequence(sync_remote_runnable: RemoteRunnable) -> None:
@@ -1243,7 +1352,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
         response = await async_client.get("/add_one/config_schema")
         assert response.json() == {
             "properties": {},
-            "title": "RunnableLambdaConfig",
+            "title": "RunnableBindingConfig",
             "type": "object",
         }
 
@@ -1252,7 +1361,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
             "properties": {
                 "tags": {"items": {"type": "string"}, "title": "Tags", "type": "array"}
             },
-            "title": "RunnableLambdaConfig",
+            "title": "RunnableBindingConfig",
             "type": "object",
         }
 
@@ -1276,7 +1385,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
                 "configurable": {"$ref": "#/definitions/Configurable"},
                 "tags": {"items": {"type": "string"}, "title": "Tags", "type": "array"},
             },
-            "title": "RunnableConfigurableFieldsConfig",
+            "title": "RunnableBindingConfig",
             "type": "object",
         }
 
@@ -1661,6 +1770,14 @@ async def test_feedback_fails_when_endpoint_disabled(app: FastAPI) -> None:
         assert response.status_code == 404
 
 
+async def test_enforce_trailing_slash_in_client() -> None:
+    """Ensure that the client enforces a trailing slash in the URL."""
+    r = RemoteRunnable(url="nosuchurl")
+    assert r.url == "nosuchurl/"
+    r = RemoteRunnable(url="nosuchurl/")
+    assert r.url == "nosuchurl/"
+
+
 async def test_per_request_config_modifier(
     event_loop: AbstractEventLoop, mocker: MockerFixture
 ) -> None:
@@ -1748,37 +1865,24 @@ async def test_uuid_serialization(event_loop: AbstractEventLoop) -> None:
         )
 
 
-@pytest.mark.skip(reason="Configuration options not implemented yet")
-async def test_all_endpoints_off() -> None:
-    """Test toggling endpoints."""
+async def test_endpoint_configurations() -> None:
+    """Test enabling/disabling endpoints."""
     app = FastAPI()
 
     # All endpoints disabled
     add_routes(
         app,
         RunnableLambda(lambda foo: "hello"),
-        with_batch=False,
-        with_invoke=False,
-        with_stream=False,
-        with_stream_log=False,
-        with_config_hash=False,
-        with_schemas=False,
+        enabled_endpoints=[],
         enable_feedback_endpoint=False,
-        with_playground=False,
     )
 
-    # All endpoints disabled
+    # All endpoints enabled
     add_routes(
         app,
         RunnableLambda(lambda foo: "hello"),
-        with_batch=True,
-        with_invoke=True,
-        with_stream=True,
-        with_stream_log=True,
-        with_config_hash=True,
-        with_schemas=True,
+        enabled_endpoints=None,
         enable_feedback_endpoint=True,
-        with_playground=True,
         path="/all_on",
     )
 
@@ -1786,14 +1890,8 @@ async def test_all_endpoints_off() -> None:
     add_routes(
         app,
         RunnableLambda(lambda foo: "hello"),
-        with_batch=True,
-        with_invoke=True,
-        with_stream=True,
-        with_stream_log=True,
-        with_config_hash=False,
-        with_schemas=True,
+        disabled_endpoints=["config_hashes"],
         enable_feedback_endpoint=True,
-        with_playground=True,
         path="/config_off",
     )
 
@@ -1852,3 +1950,32 @@ async def test_all_endpoints_off() -> None:
                     method, "/config_off" + endpoint, json=payload
                 )
                 assert response.status_code != 404, f"endpoint {endpoint} should be on"
+
+    with pytest.raises(ValueError):
+        # Passing "invoke" instead of ["invoke"]
+        add_routes(
+            app,
+            RunnableLambda(lambda foo: "hello"),
+            disabled_endpoints="invoke",  # type: ignore
+            enable_feedback_endpoint=True,
+            path="/config_off",
+        )
+    with pytest.raises(ValueError):
+        # meow is not an endpoint.
+        add_routes(
+            app,
+            RunnableLambda(lambda foo: "hello"),
+            disabled_endpoints=["meow"],  # type: ignore
+            enable_feedback_endpoint=True,
+            path="/config_off",
+        )
+
+    with pytest.raises(ValueError):
+        # meow is not an endpoint.
+        add_routes(
+            app,
+            RunnableLambda(lambda foo: "hello"),
+            enabled_endpoints=["meow"],  # type: ignore
+            enable_feedback_endpoint=True,
+            path="/config_off",
+        )

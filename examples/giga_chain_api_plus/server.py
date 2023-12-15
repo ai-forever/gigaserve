@@ -6,9 +6,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import fastapi
-from gigachat.exceptions import AuthenticationError
-from langchain.pydantic_v1 import BaseModel
-from langchain.chains.loading import load_chain_from_config
 from contextvars_executor import ContextVarExecutor
 from gigachat.context import (
     authorization_cvar,
@@ -16,6 +13,9 @@ from gigachat.context import (
     request_id_cvar,
     session_id_cvar,
 )
+from gigachat.exceptions import AuthenticationError
+from langchain.chains.loading import load_chain_from_config
+from langchain.pydantic_v1 import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 
@@ -37,6 +37,7 @@ async def middleware(request, call_next):
     client_id_cvar.set(request.headers.get("X-Client-ID"))
     session_id_cvar.set(request.headers.get("X-Session-ID"))
     request_id_cvar.set(request.headers.get("X-Request-ID"))
+    # TODO: Add X-Service-ID
 
     return await call_next(request)
 

@@ -114,7 +114,7 @@ if __name__ == "__main__":
 
 Сгенерированная OpenAPI-документация к серверу, развернутому с помощью предыдущего примера, доступна по адресу:
 
-> ⚠️ If using pydantic v2, docs will not be generated for invoke/batch/stream/stream_log. See [Pydantic](#pydantic) section below for more details.
+> ⚠️ If using pydantic v2, docs will not be generated for *invoke*, *batch*, *stream*, *stream_log*. See [Pydantic](#pydantic) section below for more details.
 
 ```sh
 curl localhost:8000/docs
@@ -193,7 +193,7 @@ response.json()
 Использование cURL:
 
 ```sh
-curl --location --request POST 'http://localhost:8000/joke/invoke/' \
+curl --location --request POST 'http://localhost:8000/joke/invoke' \
     --header 'Content-Type: application/json' \
     --data-raw '{
         "input": {
@@ -257,12 +257,12 @@ pip install "gigaserve[client]"
 
 GigaServe работает как с runnable-интерфейсами(написанным с помощью constructed via [LangChain Expression Language](https://python.langchain.com/docs/expression_language/)), так и с классическими цепочками (посредством наследования от `Chain`). Но следует учиывать, что некоторые входные схемы для устаревших цепочек могут быть некорректными или неполными и могут вызывать ошибки. Это можно предотвратить, если обновить аттрибут `input_schema` таких цепочек в LangChain.
 
-### Deploy to Azure 
+### Deploy to Azure
 
 You can deploy to Azure using Azure Container Apps (Serverless):
 
 ```
-az containerapp up --name [container-app-name] --source . --resource-group [resource-group-name] --environment  [environment-name] --ingress external --target-port 8001 --env-vars=OPENAI_API_KEY=your_key  
+az containerapp up --name [container-app-name] --source . --resource-group [resource-group-name] --environment  [environment-name] --ingress external --target-port 8001 --env-vars=OPENAI_API_KEY=your_key
 ```
 
 You can find more info [here](https://learn.microsoft.com/en-us/azure/container-apps/containerapp-up)
@@ -378,7 +378,7 @@ def func(foo: Foo) -> int:
 # runnable = RunnableLambda(func).with_types( # <-- Не нужно в данном случае
 #     input_schema=Foo,
 #     output_schema=int,
-# 
+#
 add_routes(app, RunnableLambda(func), path="/foo")
 ```
 
@@ -436,3 +436,22 @@ class FileProcessingRequest(CustomUserType):
 <p align="center">
 <img src="https://github.com/langchain-ai/langserve/assets/3205522/52199e46-9464-4c2e-8be8-222250e08c3f" width="50%"/>
 </p>
+
+
+
+### Enabling / Disabling Endpoints (LangServe >=0.0.33)
+
+You can enable / disable which endpoints are exposed. Use `enabled_endpoints` if you want to make sure to never get a new endpoint when upgrading langserve to a newer verison.
+
+Enable: The code below will only enable `invoke`, `batch` and the corresponding `config_hash` endpoint variants.
+
+
+```python
+add_routes(app, chain, enabled_endpoints=["invoke", "batch", "config_hashes"])
+```
+
+Disable: The code below will disable the playground for the chain
+
+```python
+add_routes(app, chain, disabled_endpoints=["playground"])
+```
