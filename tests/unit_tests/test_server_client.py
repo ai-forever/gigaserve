@@ -1352,7 +1352,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
         response = await async_client.get("/add_one/config_schema")
         assert response.json() == {
             "properties": {},
-            "title": "RunnableBindingConfig",
+            "title": "RunnableLambdaConfig",
             "type": "object",
         }
 
@@ -1361,7 +1361,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
             "properties": {
                 "tags": {"items": {"type": "string"}, "title": "Tags", "type": "array"}
             },
-            "title": "RunnableBindingConfig",
+            "title": "RunnableLambdaConfig",
             "type": "object",
         }
 
@@ -1385,7 +1385,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
                 "configurable": {"$ref": "#/definitions/Configurable"},
                 "tags": {"items": {"type": "string"}, "title": "Tags", "type": "array"},
             },
-            "title": "RunnableBindingConfig",
+            "title": "RunnableLambdaConfig",
             "type": "object",
         }
 
