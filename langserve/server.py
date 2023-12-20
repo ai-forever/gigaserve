@@ -352,12 +352,12 @@ def add_routes(
         _register_path_for_app(app, path)
 
     # Determine the base URL for the playground endpoint
-    base_url = (app.prefix if isinstance(app, APIRouter) else "") + path  # type: ignore
+    prefix = app.prefix if isinstance(app, APIRouter) else ""  # type: ignore
 
     api_handler = _APIHandler(
         runnable,
         path=path,
-        base_url=base_url,
+        prefix=prefix,
         input_type=input_type,
         output_type=output_type,
         config_keys=config_keys,
@@ -536,6 +536,12 @@ def add_routes(
             )(create_feedback)
 
         check_feedback_enabled = app.head(
+            namespace + "/feedback",
+        )(api_handler._check_feedback_enabled)
+
+        # Add get version which returns True/False for flow control
+        # instead of 200/400 for flow control
+        app.get(
             namespace + "/feedback",
         )(api_handler.check_feedback_enabled)
 
