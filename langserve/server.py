@@ -18,7 +18,7 @@ from typing import (
 from langchain.schema.runnable import Runnable
 from typing_extensions import Annotated
 
-from langserve.api_handler import PerRequestConfigModifier, _APIHandler, _is_hosted
+from langserve.api_handler import APIHandler, PerRequestConfigModifier, _is_hosted
 from langserve.pydantic_v1 import (
     _PYDANTIC_MAJOR_VERSION,
     PYDANTIC_VERSION,
@@ -26,10 +26,10 @@ from langserve.pydantic_v1 import (
 )
 
 try:
-    from fastapi import APIRouter, FastAPI
+    from fastapi import APIRouter, Depends, FastAPI, Request, Response
 except ImportError:
     # [server] extra not installed
-    APIRouter = FastAPI = Any
+    APIRouter = Depends = FastAPI = Request = Response = Any
 
 # A function that that takes a config and a raw request
 # and updates the config based on the request.
@@ -104,11 +104,13 @@ def _register_path_for_app(app: Union[FastAPI, APIRouter], path: str) -> None:
         _APP_TO_PATHS[app] = {path}
 
 
+# This is the type annotation
 EndpointName = Literal[
     "invoke",
     "batch",
     "stream",
     "stream_log",
+    "stream_events",
     "playground",
     "feedback",
     "input_schema",
@@ -117,11 +119,14 @@ EndpointName = Literal[
     "config_hashes",
 ]
 
+# Contains same information as EndpointName but as a set.
+# Used for run-time validation and displaying configuration errors.
 KNOWN_ENDPOINTS = {
     "invoke",
     "batch",
     "stream",
     "stream_log",
+    "stream_events",
     "playground",
     "feedback",
     "input_schema",
@@ -167,6 +172,7 @@ class _EndpointConfiguration:
                 is_batch_enabled = True
                 is_stream_enabled = True
                 is_stream_log_enabled = True
+                is_stream_events_enabled = True
                 is_playground_enabled = True
                 is_input_schema_enabled = True
                 is_output_schema_enabled = True
@@ -183,6 +189,7 @@ class _EndpointConfiguration:
                 is_batch_enabled = "batch" not in disabled_endpoints_
                 is_stream_enabled = "stream" not in disabled_endpoints_
                 is_stream_log_enabled = "stream_log" not in disabled_endpoints_
+                is_stream_events_enabled = "stream_events" not in disabled_endpoints_
                 is_playground_enabled = "playground" not in disabled_endpoints_
                 is_input_schema_enabled = "input_schema" not in disabled_endpoints_
                 is_output_schema_enabled = "output_schema" not in disabled_endpoints_
@@ -198,6 +205,7 @@ class _EndpointConfiguration:
             is_batch_enabled = "batch" in enabled_endpoints_
             is_stream_enabled = "stream" in enabled_endpoints_
             is_stream_log_enabled = "stream_log" in enabled_endpoints_
+            is_stream_events_enabled = "stream_events" in enabled_endpoints_
             is_playground_enabled = "playground" in enabled_endpoints_
             is_input_schema_enabled = "input_schema" in enabled_endpoints_
             is_output_schema_enabled = "output_schema" in enabled_endpoints_
@@ -208,10 +216,11 @@ class _EndpointConfiguration:
         self.is_batch_enabled = is_batch_enabled
         self.is_stream_enabled = is_stream_enabled
         self.is_stream_log_enabled = is_stream_log_enabled
+        self.is_stream_events_enabled = is_stream_events_enabled
         self.is_playground_enabled = is_playground_enabled
         self.is_input_schema_enabled = is_input_schema_enabled
         self.is_output_schema_enabled = is_output_schema_enabled
-        self.is_config_type_enabled = is_config_schema_enabled
+        self.is_config_schema_enabled = is_config_schema_enabled
         self.is_config_hash_enabled = is_config_hash_enabled
         self.is_feedback_enabled = enable_feedback_endpoint
 
@@ -233,6 +242,7 @@ def add_routes(
     disabled_endpoints: Optional[Sequence[EndpointName]] = None,
     stream_log_name_allow_list: Optional[Sequence[str]] = None,
     enabled_endpoints: Optional[Sequence[EndpointName]] = None,
+    dependencies: Optional[Sequence[Depends]] = None,
 ) -> None:
     """Register the routes on the given FastAPI app or APIRouter.
 
@@ -274,6 +284,9 @@ def add_routes(
             for example, if the user wants to pass in a header containing credentials
             to a runnable. The RunnableConfig is presented in its dictionary form.
             Note that only keys in `config_keys` will be modifiable by this function.
+            As of 0.0.37, this function is only called for the invoke, batch, stream,
+            and stream_log endpoints. This function is not called for the playground,
+            input_schema, output_schema, and config_schema endpoints etc.
         enable_feedback_endpoint: Whether to enable an endpoint for logging feedback
             to LangSmith. Enabled by default. If this flag is disabled or LangSmith
             tracing is not enabled for the runnable, then 400 errors will be thrown
@@ -323,8 +336,9 @@ def add_routes(
             ```
         stream_log_name_allow_list: list of run names that the client can
             stream as intermediate steps
-
-    """
+        dependencies: list of dependencies to be applied to the *path operation*.
+            See [FastAPI docs for Dependencies in path operation decorators](https://fastapi.tiangolo.com/tutorial/dependencies/dependencies-in-path-operation-decorators/).
+    """  # noqa: E501
     endpoint_configuration = _EndpointConfiguration(
         enabled_endpoints=enabled_endpoints,
         disabled_endpoints=disabled_endpoints,
@@ -354,7 +368,16 @@ def add_routes(
     # Determine the base URL for the playground endpoint
     prefix = app.prefix if isinstance(app, APIRouter) else ""  # type: ignore
 
-    api_handler = _APIHandler(
+    # Let's check if the runnable has a astream events property
+    # It's a new method on runnables that allows them to stream events.
+    # We'll only add this if folks are on recent versions of langchain-core.
+    # This is done so that folks can upgrade langserve without having to
+    # upgrade langchain-core if they need other fixes.
+    # We can likely remove in a few months and bump minimal version of langchain
+    # required by langserve.
+    has_astream_events = hasattr(runnable, "astream_events")
+
+    api_handler = APIHandler(
         runnable,
         path=path,
         prefix=prefix,
@@ -394,7 +417,7 @@ def add_routes(
             # When using pydantic v2, we cannot generate openapi docs for
             # the invoke/batch/stream/stream_log endpoints since the underlying
             # models are from the pydantic.v1 namespace and cannot be supported
-            # by fastapi's.
+            # by FastAPI's.
             # https://github.com/tiangolo/fastapi/issues/10360
             default_endpoint_tags = {
                 "name": route_tags[0] if route_tags else "default",
@@ -430,125 +453,240 @@ def add_routes(
             ]
 
     if endpoint_configuration.is_invoke_enabled:
-        invoke = app.post(f"{namespace}/invoke", include_in_schema=False)(
-            api_handler.invoke
+
+        @app.post(
+            f"{namespace}/invoke", include_in_schema=False, dependencies=dependencies
         )
+        async def invoke(request: Request) -> Response:
+            """Handle a request."""
+            # The API Handler validates the parts of the request
+            # that are used by the runnnable (e.g., input, config fields)
+            return await api_handler.invoke(request)
 
         if endpoint_configuration.is_config_hash_enabled:
-            app.post(
+
+            @app.post(
                 namespace + "/c/{config_hash}/invoke",
                 include_in_schema=False,
-            )(invoke)
+                dependencies=dependencies,
+            )
+            async def invoke_with_config(
+                request: Request, config_hash: str = ""
+            ) -> Response:
+                """Handle a request."""
+                # The API Handler validates the parts of the request
+                # that are used by the runnnable (e.g., input, config fields)
+                return await api_handler.invoke(request, config_hash=config_hash)
 
     if endpoint_configuration.is_batch_enabled:
-        batch = app.post(f"{namespace}/batch", include_in_schema=False)(
-            api_handler.batch
+
+        @app.post(
+            f"{namespace}/batch", include_in_schema=False, dependencies=dependencies
         )
+        async def batch(request: Request) -> Response:
+            """Handle a request."""
+            # The API Handler validates the parts of the request
+            # that are used by the runnnable (e.g., input, config fields)
+            return await api_handler.batch(request)
 
         if endpoint_configuration.is_config_hash_enabled:
-            app.post(
+
+            @app.post(
                 namespace + "/c/{config_hash}/batch",
                 include_in_schema=False,
-            )(batch)
+                dependencies=dependencies,
+            )
+            async def batch_with_config(
+                request: Request, config_hash: str = ""
+            ) -> Response:
+                """Handle a request."""
+                # The API Handler validates the parts of the request
+                # that are used by the runnnable (e.g., input, config fields)
+                return await api_handler.batch(request, config_hash=config_hash)
 
     if endpoint_configuration.is_stream_enabled:
-        stream = app.post(f"{namespace}/stream", include_in_schema=False)(
-            api_handler.stream
+
+        @app.post(
+            f"{namespace}/stream", include_in_schema=False, dependencies=dependencies
         )
+        async def stream(request: Request) -> EventSourceResponse:
+            """Handle a request."""
+            # The API Handler validates the parts of the request
+            # that are used by the runnnable (e.g., input, config fields)
+            return await api_handler.stream(request)
 
         if endpoint_configuration.is_config_hash_enabled:
-            app.post(
+
+            @app.post(
                 namespace + "/c/{config_hash}/stream",
                 include_in_schema=False,
-            )(stream)
+                dependencies=dependencies,
+            )
+            async def stream_with_config(
+                request: Request, config_hash: str = ""
+            ) -> EventSourceResponse:
+                """Handle a request."""
+                # The API Handler validates the parts of the request
+                # that are used by the runnnable (e.g., input, config fields)
+                return await api_handler.stream(request, config_hash=config_hash)
 
     if endpoint_configuration.is_stream_log_enabled:
-        stream_log = app.post(f"{namespace}/stream_log", include_in_schema=False)(
-            api_handler.stream_log
+
+        @app.post(
+            f"{namespace}/stream_log",
+            include_in_schema=False,
+            dependencies=dependencies,
         )
+        async def stream_log(request: Request) -> EventSourceResponse:
+            """Handle a request."""
+            # The API Handler validates the parts of the request
+            # that are used by the runnnable (e.g., input, config fields)
+            return await api_handler.stream_log(request)
 
         if endpoint_configuration.is_config_hash_enabled:
-            app.post(
+
+            @app.post(
                 namespace + "/c/{config_hash}/stream_log",
                 include_in_schema=False,
-            )(stream_log)
+                dependencies=dependencies,
+            )
+            async def stream_log_with_config(
+                request: Request, config_hash: str = ""
+            ) -> EventSourceResponse:
+                """Handle a request."""
+                # The API Handler validates the parts of the request
+                # that are used by the runnnable (e.g., input, config fields)
+                return await api_handler.stream_log(request, config_hash=config_hash)
 
-    if endpoint_configuration.is_input_schema_enabled:
-        input_schema = app.get(
-            f"{namespace}/input_schema",
-            tags=route_tags,
-            name=_route_name("input_schema"),
-        )(api_handler.input_schema)
+    if has_astream_events and endpoint_configuration.is_stream_events_enabled:
+
+        @app.post(
+            f"{namespace}/stream_events",
+            include_in_schema=False,
+            dependencies=dependencies,
+        )
+        async def stream_events(request: Request) -> EventSourceResponse:
+            """Handle a request."""
+            # The API Handler validates the parts of the request
+            # that are used by the runnnable (e.g., input, config fields)
+            return await api_handler.astream_events(request)
 
         if endpoint_configuration.is_config_hash_enabled:
-            app.get(
+
+            @app.post(
+                namespace + "/c/{config_hash}/stream_events",
+                include_in_schema=False,
+                dependencies=dependencies,
+            )
+            async def stream_events_with_config(
+                request: Request, config_hash: str = ""
+            ) -> EventSourceResponse:
+                """Handle a request."""
+                # The API Handler validates the parts of the request
+                # that are used by the runnnable (e.g., input, config fields)
+                return await api_handler.astream_events(
+                    request, config_hash=config_hash
+                )
+
+    if endpoint_configuration.is_input_schema_enabled:
+
+        @app.get(
+            f"{namespace}/input_schema",
+            name=_route_name("input_schema"),
+            tags=route_tags,
+            dependencies=dependencies,
+        )
+        async def input_schema(request: Request) -> Response:
+            """Return the input schema."""
+            return await api_handler.input_schema(request)
+
+        if endpoint_configuration.is_config_hash_enabled:
+
+            @app.get(
                 namespace + "/c/{config_hash}/input_schema",
-                tags=route_tags_with_config,
                 name=_route_name_with_config("input_schema"),
-            )(input_schema)
+                tags=route_tags_with_config,
+                dependencies=dependencies,
+            )
+            async def input_schema_with_config(
+                request: Request, config_hash: str = ""
+            ) -> Response:
+                """Return the input schema."""
+                return await api_handler.input_schema(request, config_hash=config_hash)
 
     if endpoint_configuration.is_output_schema_enabled:
-        output_schema = app.get(
+
+        @app.get(
             f"{namespace}/output_schema",
-            tags=route_tags,
             name=_route_name("output_schema"),
-        )(api_handler.output_schema)
-
-        if endpoint_configuration.is_config_hash_enabled:
-            app.get(
-                namespace + "/c/{config_hash}/output_schema",
-                tags=route_tags_with_config,
-                name=_route_name_with_config("output_schema"),
-            )(output_schema)
-
-    if endpoint_configuration.is_input_schema_enabled:
-        config_schema = app.get(
-            f"{namespace}/config_schema",
             tags=route_tags,
-            name=_route_name("config_schema"),
-        )(api_handler.config_schema)
+            dependencies=dependencies,
+        )
+        async def output_schema(request: Request) -> Response:
+            """Return the output schema."""
+            return await api_handler.output_schema(request)
 
         if endpoint_configuration.is_config_hash_enabled:
-            app.get(
-                namespace + "/c/{config_hash}/config_schema",
+
+            @app.get(
+                namespace + "/c/{config_hash}/output_schema",
+                name=_route_name_with_config("output_schema"),
                 tags=route_tags_with_config,
+                dependencies=dependencies,
+            )
+            async def output_schema_with_config(
+                request: Request, config_hash: str = ""
+            ) -> Response:
+                """Return the output schema."""
+                return await api_handler.output_schema(request, config_hash=config_hash)
+
+    if endpoint_configuration.is_config_schema_enabled:
+
+        @app.get(
+            f"{namespace}/config_schema",
+            name=_route_name("config_schema"),
+            tags=route_tags,
+            dependencies=dependencies,
+        )
+        async def config_schema(request: Request) -> Response:
+            """Return the config schema."""
+            return await api_handler.config_schema(request)
+
+        if endpoint_configuration.is_config_hash_enabled:
+
+            @app.get(
+                namespace + "/c/{config_hash}/config_schema",
                 name=_route_name_with_config("config_schema"),
-            )(config_schema)
+                tags=route_tags_with_config,
+                dependencies=dependencies,
+            )
+            async def config_schema_with_config(
+                request: Request, config_hash: str = ""
+            ) -> Response:
+                """Return the config schema."""
+                return await api_handler.config_schema(request, config_hash=config_hash)
 
     if endpoint_configuration.is_playground_enabled:
-        playground = app.get(namespace + "/playground/{file_path:path}")(
-            api_handler.playground
-        )
+        playground = app.get(
+            namespace + "/playground/{file_path:path}", dependencies=dependencies
+        )(api_handler.playground)
 
         if endpoint_configuration.is_config_hash_enabled:
             app.get(
                 namespace + "/c/{config_hash}/playground/{file_path:path}",
+                dependencies=dependencies,
             )(playground)
 
     if enable_feedback_endpoint:
-        create_feedback = app.post(
+        app.post(
             namespace + "/feedback",
+            dependencies=dependencies,
         )(api_handler.create_feedback)
 
-        if endpoint_configuration.is_config_hash_enabled:
-            app.post(
-                namespace + "/c/{config_hash}/feedback",
-            )(create_feedback)
-
-        check_feedback_enabled = app.head(
+        app.head(
             namespace + "/feedback",
+            dependencies=dependencies,
         )(api_handler._check_feedback_enabled)
-
-        # Add get version which returns True/False for flow control
-        # instead of 200/400 for flow control
-        app.get(
-            namespace + "/feedback",
-        )(api_handler.check_feedback_enabled)
-
-        if endpoint_configuration.is_config_hash_enabled:  # Is this needed?
-            app.head(
-                namespace + "/c/{config_hash}/feedback",
-            )(check_feedback_enabled)
 
     #######################################
     # Documentation variants of end points.
@@ -561,6 +699,7 @@ def add_routes(
         BatchResponse = api_handler.BatchResponse
         StreamRequest = api_handler.StreamRequest
         StreamLogRequest = api_handler.StreamLogRequest
+        StreamEventsRequest = api_handler.StreamEventsRequest
 
         if endpoint_configuration.is_invoke_enabled:
 
@@ -576,6 +715,7 @@ def add_routes(
                 response_model=api_handler.InvokeResponse,
                 tags=route_tags,
                 name=_route_name("invoke"),
+                dependencies=dependencies,
             )(_invoke_docs)
 
             if endpoint_configuration.is_config_hash_enabled:
@@ -584,6 +724,7 @@ def add_routes(
                     response_model=api_handler.InvokeResponse,
                     tags=route_tags_with_config,
                     name=_route_name_with_config("invoke"),
+                    dependencies=dependencies,
                     description=(
                         "This endpoint is to be used with share links generated by the "
                         "LangServe playground. "
@@ -607,6 +748,7 @@ def add_routes(
                 response_model=BatchResponse,
                 tags=route_tags,
                 name=_route_name("batch"),
+                dependencies=dependencies,
             )(_batch_docs)
 
             if endpoint_configuration.is_config_hash_enabled:
@@ -615,6 +757,7 @@ def add_routes(
                     response_model=BatchResponse,
                     tags=route_tags_with_config,
                     name=_route_name_with_config("batch"),
+                    dependencies=dependencies,
                     description=(
                         "This endpoint is to be used with share links generated by the "
                         "LangServe playground. "
@@ -639,21 +782,30 @@ def add_routes(
                 https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events
 
                 Important: Set the "text/event-stream" media type for request headers if
-                           not using an existing SDK.
+                    not using an existing SDK.
 
-                This endpoint uses two different types of events:
+                The events that the endpoint uses are the following:
+                * "data" -- used for streaming the output of the runnale
+                * "error" -- signaling an error while streaming and ends the stream.
+                * "end" -- used for signaling the end of the stream
+                * "metadata" -- used for sending metadata about the run; e.g., run id.
 
-                * data - for streaming the output of the runnable
+                The event type is in the "event" field of the event.
+                The payload associated with the event is in the "data" field
+                of the event, and it is JSON encoded.
 
-                    {
-                        "event": "data",
-                        "data": {
+
+                Here are some examples of events that the endpoint can send:
+
+                Regular streaming event:
+                {
+                    "event": "data",
+                    "data": {
                         ...
-                        }
                     }
+                }
 
-                * error - for signaling an error in the stream, also ends the stream.
-
+                Internal server error:
                 {
                     "event": "error",
                     "data": {
@@ -662,14 +814,10 @@ def add_routes(
                     }
                 }
 
-                * end - for signaling the end of the stream.
-
-                    This helps the client to know when to stop listening for events and
-                    know that the streaming has ended successfully.
-
-                    {
-                        "event": "end",
-                    }
+                Streaming ended so client should stop listening for events:
+                {
+                    "event": "end",
+                }
                 """
                 raise AssertionError("This endpoint should not be reachable.")
 
@@ -678,6 +826,12 @@ def add_routes(
                 include_in_schema=True,
                 tags=route_tags,
                 name=_route_name("stream"),
+                description=(
+                    "This endpoint allows to stream the output of the runnable. "
+                    "The endpoint uses a server sent event stream to stream the "
+                    "output. "
+                    "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"
+                ),
             )(_stream_docs)
 
             if endpoint_configuration.is_config_hash_enabled:
@@ -686,6 +840,7 @@ def add_routes(
                     include_in_schema=True,
                     tags=route_tags_with_config,
                     name=_route_name_with_config("stream"),
+                    dependencies=dependencies,
                     description=(
                         "This endpoint is to be used with share links generated by the "
                         "LangServe playground. "
@@ -750,6 +905,7 @@ def add_routes(
                 include_in_schema=True,
                 tags=route_tags,
                 name=_route_name("stream_log"),
+                dependencies=dependencies,
             )(_stream_log_docs)
 
             if endpoint_configuration.is_config_hash_enabled:
@@ -765,4 +921,99 @@ def add_routes(
                         "For regular use cases, use the /stream_log endpoint without "
                         "the `c/{config_hash}` path parameter."
                     ),
+                    dependencies=dependencies,
                 )(_stream_log_docs)
+
+        if has_astream_events and endpoint_configuration.is_stream_events_enabled:
+
+            async def _stream_events_docs(
+                stream_events_request: Annotated[
+                    StreamEventsRequest, StreamEventsRequest
+                ],
+                config_hash: str = "",
+            ) -> EventSourceResponse:
+                """Stream events from the given runnable.
+
+                This endpoint allows to stream events from the runnable, including
+                events from all intermediate steps.
+
+                **Attention**
+
+                    This is a new endpoint that only works for langchain-core >= 0.1.14.
+
+                    It belongs to a Beta API that may change in the future.
+
+                **Important**
+                    Specify filters to the events you want to receive by setting
+                    the appropriate filters in the request body.
+
+                    This will help avoid sending too much data over the network.
+
+                    It will also prevent serialization issues with
+                    any unsupported types since it won't need to serialize events
+                    that aren't transmitted.
+
+                The endpoint uses a server sent event stream to stream the output.
+
+                https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events
+
+                The encoding of events follows the following format:
+
+                * data - for streaming the output of the runnable
+
+                    {
+                        "event": "data",
+                        "data": {
+                        ...
+                        }
+                    }
+
+                * error - for signaling an error in the stream, also ends the stream.
+
+                {
+                    "event": "error",
+                    "data": {
+                        "status_code": 500,
+                        "message": "Internal Server Error"
+                    }
+                }
+
+                * end - for signaling the end of the stream.
+
+                    This helps the client to know when to stop listening for events and
+                    know that the streaming has ended successfully.
+
+                    {
+                        "event": "end",
+                    }
+
+                `data` for the `data` event is a JSON object that corresponds
+                to a serialized representation of a StreamEvent.
+
+                See LangChain documentation for more information about astream_events.
+                """
+                raise AssertionError("This endpoint should not be reachable.")
+
+            app.post(
+                f"{namespace}/stream_events",
+                include_in_schema=True,
+                tags=route_tags,
+                name=_route_name("stream_events"),
+                dependencies=dependencies,
+            )(_stream_events_docs)
+
+            if endpoint_configuration.is_config_hash_enabled:
+                app.post(
+                    namespace + "/c/{config_hash}/stream_events",
+                    include_in_schema=True,
+                    tags=route_tags_with_config,
+                    name=_route_name_with_config("stream_events"),
+                    description=(
+                        "This endpoint is to be used with share links generated by the "
+                        "LangServe playground. "
+                        "The hash is an LZString compressed JSON string. "
+                        "For regular use cases, use the /stream_events endpoint "
+                        "without the `c/{config_hash}` path parameter."
+                    ),
+                    dependencies=dependencies,
+                )(_stream_events_docs)

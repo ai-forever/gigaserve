@@ -4,15 +4,26 @@ import datetime
 import json
 from asyncio import AbstractEventLoop
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Union
+from itertools import cycle
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Union,
+)
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 from langchain.callbacks.tracers.log_stream import RunLog, RunLogPatch
@@ -22,10 +33,17 @@ from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain.schema.runnable import Runnable, RunnableConfig, RunnablePassthrough
 from langchain.schema.runnable.base import RunnableLambda
 from langchain.schema.runnable.utils import ConfigurableField, Input, Output
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.outputs import ChatGenerationChunk, LLMResult
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from langsmith import schemas as ls_schemas
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
-from typing_extensions import TypedDict
+from typing_extensions import Annotated, TypedDict
 
 from langserve import api_handler
 from langserve.api_handler import (
@@ -42,7 +60,8 @@ try:
 except ImportError:
     from pydantic import BaseModel, Field
 from langserve.server import add_routes
-from tests.unit_tests.utils import FakeListLLM, FakeTracer
+from tests.unit_tests.utils.llms import FakeListLLM, GenericFakeChatModel
+from tests.unit_tests.utils.tracer import FakeTracer
 
 
 def _decode_eventstream(text: str) -> List[Dict[str, Any]]:
@@ -241,15 +260,15 @@ def test_server(app: FastAPI) -> None:
     # Test schema
     input_schema = sync_client.get("/input_schema").json()
     assert isinstance(input_schema, dict)
-    assert input_schema["title"] == "RunnableLambdaInput"
+    assert input_schema["title"] == "add_one_or_passthrough_input"
     #
     output_schema = sync_client.get("/output_schema").json()
     assert isinstance(output_schema, dict)
-    assert output_schema["title"] == "RunnableLambdaOutput"
+    assert output_schema["title"] == "add_one_or_passthrough_output"
 
     output_schema = sync_client.get("/config_schema").json()
     assert isinstance(output_schema, dict)
-    assert output_schema["title"] == "RunnableLambdaConfig"
+    assert output_schema["title"] == "add_one_or_passthrough_config"
 
     # TODO(Team): Fix test. Issue with eventloops right now when using sync client
     # # Test stream
@@ -392,6 +411,69 @@ async def test_server_async(app: FastAPI) -> None:
         assert stream_events[0]["data"]["status_code"] == 422
 
         response = await async_client.post("/stream_log", json={})
+        stream_events = _decode_eventstream(response.text)
+        assert stream_events[0]["type"] == "error"
+        assert stream_events[0]["data"]["status_code"] == 422
+
+
+async def test_server_astream_events(app: FastAPI) -> None:
+    """Test the server directly via HTTP requests.
+
+    Here we test just astream_events server side without a Remote Client.
+    """
+    async with get_async_test_client(app, raise_app_exceptions=True) as async_client:
+        # Test invoke
+        # Test stream
+        response = await async_client.post("/stream_events", json={"input": 1})
+        # Decode the event stream using plain json de-serialization
+        events = _decode_eventstream(response.text)
+
+        for event in events:
+            if "data" in event:
+                assert "run_id" in event["data"]
+                del event["data"]["run_id"]
+                assert "metadata" in event["data"]
+                del event["data"]["metadata"]
+
+        assert events == [
+            {
+                "data": {
+                    "data": {"input": 1},
+                    "event": "on_chain_start",
+                    "name": "add_one_or_passthrough",
+                    "tags": [],
+                },
+                "type": "data",
+            },
+            {
+                "data": {
+                    "data": {"chunk": 2},
+                    "event": "on_chain_stream",
+                    "name": "add_one_or_passthrough",
+                    "tags": [],
+                },
+                "type": "data",
+            },
+            {
+                "data": {
+                    "data": {"output": 2},
+                    "event": "on_chain_end",
+                    "name": "add_one_or_passthrough",
+                    "tags": [],
+                },
+                "type": "data",
+            },
+            {"type": "end"},
+        ]
+
+    # test stream_events with bad requests
+    async with get_async_test_client(app, raise_app_exceptions=True) as async_client:
+        response = await async_client.post("/stream_events", data="bad json []")
+        stream_events = _decode_eventstream(response.text)
+        assert stream_events[0]["type"] == "error"
+        assert stream_events[0]["data"]["status_code"] == 422
+
+        response = await async_client.post("/stream_events", json={})
         stream_events = _decode_eventstream(response.text)
         assert stream_events[0]["type"] == "error"
         assert stream_events[0]["data"]["status_code"] == 422
@@ -652,6 +734,8 @@ async def test_astream_log_diff_no_effect(
                     "id": uuid,
                     "logs": {},
                     "streamed_output": [],
+                    "type": "chain",
+                    "name": "add_one_or_passthrough",
                 },
             }
         ],
@@ -663,6 +747,8 @@ async def test_astream_log_diff_no_effect(
         "id": uuid,
         "logs": {},
         "streamed_output": [2],
+        "type": "chain",
+        "name": "add_one_or_passthrough",
     }
 
 
@@ -718,6 +804,8 @@ async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
                         "id": uuid,
                         "logs": {},
                         "streamed_output": [],
+                        "type": "chain",
+                        "name": "add_one",
                     },
                 }
             ],
@@ -730,10 +818,11 @@ async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
             "id": uuid,
             "logs": {},
             "streamed_output": [2],
+            "type": "chain",
+            "name": "add_one",
         }
 
 
-@pytest.mark.asyncio
 async def test_astream_log_allowlist(event_loop: AbstractEventLoop) -> None:
     """Test async stream with an allowlist."""
 
@@ -909,6 +998,8 @@ async def test_invoke_as_part_of_sequence_async(
             "id": first_op["value"]["id"],
             "logs": {},
             "streamed_output": [],
+            "type": "chain",
+            "name": "RunnableSequence",
         },
     }
 
@@ -1307,10 +1398,10 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
     async with AsyncClient(app=app, base_url="http://localhost:9999") as async_client:
         # input schema
         response = await async_client.get("/add_one/input_schema")
-        assert response.json() == {"title": "RunnableLambdaInput", "type": "integer"}
+        assert response.json() == {"title": "add_one_input", "type": "integer"}
 
         response = await async_client.get("/add_two_custom/input_schema")
-        assert response.json() == {"title": "RunnableBindingInput", "type": "number"}
+        assert response.json() == {"title": "add_two_input", "type": "number"}
 
         response = await async_client.get("/prompt_1/input_schema")
         assert response.json() == {
@@ -1329,12 +1420,12 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
         # output schema
         response = await async_client.get("/add_one/output_schema")
         assert response.json() == {
-            "title": "RunnableLambdaOutput",
+            "title": "add_one_output",
             "type": "integer",
         }
 
         response = await async_client.get("/add_two_custom/output_schema")
-        assert response.json() == {"title": "RunnableBindingOutput", "type": "number"}
+        assert response.json() == {"title": "add_two_output", "type": "number"}
 
         # Just verify that the schema is not empty (it's pretty long)
         # and the actual value should be tested in LangChain
@@ -1348,7 +1439,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
         response = await async_client.get("/add_one/config_schema")
         assert response.json() == {
             "properties": {},
-            "title": "RunnableLambdaConfig",
+            "title": "add_one_config",
             "type": "object",
         }
 
@@ -1357,7 +1448,7 @@ async def test_input_config_output_schemas(event_loop: AbstractEventLoop) -> Non
             "properties": {
                 "tags": {"items": {"type": "string"}, "title": "Tags", "type": "array"}
             },
-            "title": "RunnableLambdaConfig",
+            "title": "add_two_config",
             "type": "object",
         }
 
@@ -1417,7 +1508,7 @@ async def test_input_schema_typed_dict() -> None:
                     "type": "object",
                 }
             },
-            "title": "RunnableBindingInput",
+            "title": "passthrough_dict_input",
         }
 
 
@@ -1774,9 +1865,7 @@ async def test_enforce_trailing_slash_in_client() -> None:
     assert r.url == "nosuchurl/"
 
 
-async def test_per_request_config_modifier(
-    event_loop: AbstractEventLoop, mocker: MockerFixture
-) -> None:
+async def test_per_request_config_modifier(event_loop: AbstractEventLoop) -> None:
     """Test updating the config based on the raw request object."""
 
     async def add_one(x: int) -> int:
@@ -1785,10 +1874,18 @@ async def test_per_request_config_modifier(
 
     app = FastAPI()
 
-    def header_passthru_modifier(
+    async def header_passthru_modifier(
         config: Dict[str, Any], request: Request
     ) -> Dict[str, Any]:
         """Update the config"""
+        # Make sure we can access the request body if we need to
+        body = await request.json()
+        # Hard-codes the expected body just for the test
+        # This is tested with just the version
+        assert body == {
+            "input": 1,
+        }
+
         config = config.copy()
         if "metadata" in config:
             config["metadata"] = config["metadata"].copy()
@@ -1805,6 +1902,78 @@ async def test_per_request_config_modifier(
         path="/add_one",
         per_req_config_modifier=header_passthru_modifier,
     )
+
+    async with get_async_test_client(app) as async_client:
+        response = await async_client.post("/add_one/invoke", json={"input": 1})
+        assert response.json()["output"] == 2
+
+
+async def test_per_request_config_modifier_endpoints(
+    event_loop: AbstractEventLoop,
+) -> None:
+    """Verify that per request modifier is only applied for the expected endpoints."""
+
+    # this test verifies that per request modifier is only
+    # applied for the expected endpoints
+    async def add_one(x: int) -> int:
+        """Add one to simulate a valid function"""
+        return x + 1
+
+    app = FastAPI()
+    server_runnable = RunnableLambda(add_one)
+
+    async def buggy_modifier(
+        config: Dict[str, Any], request: Request
+    ) -> Dict[str, Any]:
+        """Update the config"""
+        body = await request.json()  # Make sure we can access the request body always.
+        assert isinstance(body, dict)
+        raise ValueError("oops I did it again")
+
+    add_routes(
+        app,
+        server_runnable,
+        path="/with_buggy_modifier",
+        per_req_config_modifier=buggy_modifier,
+    )
+
+    async with get_async_test_client(
+        app,
+        raise_app_exceptions=False,
+    ) as async_client:
+        endpoints_to_test = (
+            "invoke",
+            "batch",
+            "stream",
+            "stream_log",
+            "input_schema",
+            "output_schema",
+            "config_schema",
+            "playground/index.html",
+        )
+
+        for endpoint in endpoints_to_test:
+            url = "/with_buggy_modifier/" + endpoint
+
+            if endpoint == "batch":
+                payload = {"inputs": [1, 2]}
+                response = await async_client.post(url, json=payload)
+            elif endpoint in {"invoke", "stream", "stream_log"}:
+                payload = {"input": 1}
+                response = await async_client.post(url, json=payload)
+            elif endpoint in {"input_schema", "output_schema", "config_schema"}:
+                response = await async_client.get(url)
+            elif endpoint == "playground/index.html":
+                response = await async_client.get(url)
+            else:
+                raise ValueError(f"Unknown endpoint {endpoint}")
+
+            if endpoint in {"invoke", "batch"}:
+                assert response.status_code == 500
+            elif endpoint in {"stream", "stream_log"}:
+                assert '"status_code": 500' in response.text
+            else:
+                assert response.status_code != 500
 
 
 async def test_uuid_serialization(event_loop: AbstractEventLoop) -> None:
@@ -1896,6 +2065,7 @@ async def test_endpoint_configurations() -> None:
         ("POST", "/batch", {"inputs": [1, 2]}),
         ("POST", "/stream", {"input": 1}),
         ("POST", "/stream_log", {"input": 1}),
+        ("POST", "/stream_events", {"input": 1}),
         ("GET", "/input_schema", {}),
         ("GET", "/output_schema", {}),
         ("GET", "/config_schema", {}),
@@ -1907,11 +2077,11 @@ async def test_endpoint_configurations() -> None:
         ("POST", "/c/1234/batch", {"inputs": [1, 2]}),
         ("POST", "/c/1234/stream", {"input": 1}),
         ("POST", "/c/1234/stream_log", {"input": 1}),
-        ("POST", "/c/1234/input_schema", {}),
-        ("POST", "/c/1234/output_schema", {}),
-        ("POST", "/c/1234/config_schema", {}),
-        ("POST", "/c/1234/playground/index.html", {}),
-        ("POST", "/c/1234/feedback", {}),
+        ("POST", "/c/1234/stream_events", {"input": 1}),
+        ("GET", "/c/1234/input_schema", {}),
+        ("GET", "/c/1234/output_schema", {}),
+        ("GET", "/c/1234/config_schema", {}),
+        ("GET", "/c/1234/playground/index.html", {}),
     ]
 
     # All endpoints disabled
@@ -1930,7 +2100,16 @@ async def test_endpoint_configurations() -> None:
             # It may still be 4xx due to incorrect payload etc, but
             # we don't care, we just want to make sure that the endpoint
             # is enabled.
-            assert response.status_code != 404, f"endpoint {endpoint} should be on"
+            if "feedback" in endpoint:
+                # Feedback returns 405 if tracing is disabled
+                error_codes = {404}
+            else:
+                error_codes = {404, 405}
+            if response.status_code in error_codes:
+                raise AssertionError(
+                    f"Endpoint {endpoint} should be on. "
+                    f"Test case: ({method}, {endpoint}, {payload}) with {response.text}"
+                )
 
     # Config disabled
     async with get_async_test_client(app, raise_app_exceptions=False) as async_client:
@@ -1946,7 +2125,14 @@ async def test_endpoint_configurations() -> None:
                 response = await async_client.request(
                     method, "/config_off" + endpoint, json=payload
                 )
-                assert response.status_code != 404, f"endpoint {endpoint} should be on"
+                if endpoint == "/feedback":
+                    # Feedback returns 405 if tracing is disabled
+                    error_codes = {404}
+                else:
+                    error_codes = {404, 405}
+                assert (
+                    response.status_code not in error_codes
+                ), f"endpoint {endpoint} should be on"
 
     with pytest.raises(ValueError):
         # Passing "invoke" instead of ["invoke"]
@@ -1976,3 +2162,623 @@ async def test_endpoint_configurations() -> None:
             enable_feedback_endpoint=True,
             path="/config_off",
         )
+
+
+async def test_astream_events_simple(async_remote_runnable: RemoteRunnable) -> None:
+    """Test astream events using a simple chain.
+
+    This test should not involve any complex serialization logic.
+    """
+
+    app = FastAPI()
+
+    def add_one(x: int) -> int:
+        """Add one to simulate a valid function"""
+        return x + 1
+
+    def mul_two(y: int) -> int:
+        """Add one to simulate a valid function"""
+        return y * 2
+
+    runnable = RunnableLambda(add_one) | RunnableLambda(mul_two)
+    add_routes(app, runnable)
+
+    # Invoke request
+    async with get_async_remote_runnable(app, raise_app_exceptions=False) as runnable:
+        # Test bad requests
+        # test client side error
+        with pytest.raises(httpx.HTTPStatusError) as cb:
+            # Invalid input type (expected string but got int)
+            async for _ in runnable.astream_events("foo", version="v1"):
+                pass
+
+        # Verify that this is a 422 error
+        assert cb.value.response.status_code == 422
+
+        with pytest.raises(httpx.HTTPStatusError) as cb:
+            # Invalid input type (expected string but got int)
+            # include names should not be a list of lists
+            async for _ in runnable.astream_events(1, include_names=[[]], version="v1"):
+                pass
+
+        # Verify that this is a 422 error
+        assert cb.value.response.status_code == 422
+
+        # Test good requests
+        events = []
+
+        async for event in runnable.astream_events(1, version="v1"):
+            events.append(event)
+
+        # validate events
+        for event in events:
+            assert "run_id" in event
+            del event["run_id"]
+            # Assert that we don't include any "internal" metadata
+            # in the events
+            for k, v in event["metadata"].items():
+                assert not k.startswith("__")
+            assert "metadata" in event
+            del event["metadata"]
+
+        assert events == [
+            {
+                "data": {"input": 1},
+                "event": "on_chain_start",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+            {
+                "data": {},
+                "event": "on_chain_start",
+                "name": "add_one",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {"chunk": 2},
+                "event": "on_chain_stream",
+                "name": "add_one",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {},
+                "event": "on_chain_start",
+                "name": "mul_two",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"input": 1, "output": 2},
+                "event": "on_chain_end",
+                "name": "add_one",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {"chunk": 4},
+                "event": "on_chain_stream",
+                "name": "mul_two",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"chunk": 4},
+                "event": "on_chain_stream",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+            {
+                "data": {"input": 2, "output": 4},
+                "event": "on_chain_end",
+                "name": "mul_two",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"output": 4},
+                "event": "on_chain_end",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+        ]
+
+
+def _clean_up_events(events: List[Dict[str, Any]]) -> None:
+    """Clean up events to make it easy to compare them."""
+    for event in events:
+        assert "run_id" in event
+        del event["run_id"]
+        # Assert that we don't include any "internal" metadata
+        # in the events
+        for k, v in event["metadata"].items():
+            assert not k.startswith("__")
+        assert "metadata" in event
+        del event["metadata"]
+
+
+async def test_astream_events_with_serialization(
+    async_remote_runnable: RemoteRunnable,
+) -> None:
+    """Test serialization logic in astream events.
+
+    Intermediate steps in the chain may involve arbitrary types.
+
+    Let's check that we can serialize some of the well known types.
+    """
+
+    app = FastAPI()
+
+    def to_document(query: str) -> List[Document]:
+        """Convert a query to a document"""
+        return [
+            Document(page_content=query, metadata={"a": "b"}),
+            Document(page_content=query[::-1]),
+        ]
+
+    def from_document(documents: List[Document]) -> str:
+        """Convert a document to a string"""
+        return documents[0].page_content
+
+    # This should work since we have built in serializers for Document
+    chain = RunnableLambda(to_document) | RunnableLambda(from_document)
+    add_routes(app, chain, path="/doc_types")
+
+    # Add a test case for serialization of a dataclass
+    # This will be serialized using FastAPI's built in serializer for dataclasses
+    # It will not however be decoded properly into a dataclass on the client side
+    # since the client side does not have enough information to do so.
+    @dataclass
+    class Pet:
+        name: str
+        age: int
+
+    def get_pets(query: str) -> List[Pet]:
+        """Get pets"""
+        return [
+            Pet(name="foo", age=1),
+            Pet(name="bar", age=2),
+        ]
+
+    # Works because of built-in serializer for dataclass from fast api
+    # But it will not deserialize correctly into a dataclass (this is OK)
+    add_routes(app, RunnableLambda(get_pets), path="/get_pets")
+
+    class NotSerializable:
+        def __init__(self, foo: int) -> None:
+            """Create a non-serializable class"""
+            self.foo = foo
+
+    def into_non_serializable(query: str) -> List[NotSerializable]:
+        """Return non serializable data"""
+        return [NotSerializable(foo=1)]
+
+    def back_to_serializable(inputs) -> str:
+        """Return non serializable data"""
+        return "hello"
+
+    # Works because of built-in serializer for dataclass from fast api
+    # But it will not deserialize correctly into a dataclass (this is OK)
+    chain = RunnableLambda(into_non_serializable) | RunnableLambda(back_to_serializable)
+    add_routes(app, chain, path="/break")
+
+    # Invoke request
+    async with get_async_remote_runnable(
+        app, raise_app_exceptions=False, path="/doc_types"
+    ) as runnable:
+        # Test good requests
+        events = [event async for event in runnable.astream_events("foo", version="v1")]
+        _clean_up_events(events)
+
+        assert events == [
+            {
+                "data": {"input": "foo"},
+                "event": "on_chain_start",
+                "name": "/doc_types",
+                "tags": [],
+            },
+            {
+                "data": {},
+                "event": "on_chain_start",
+                "name": "to_document",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {
+                    "chunk": [
+                        Document(page_content="foo", metadata={"a": "b"}),
+                        Document(page_content="oof"),
+                    ]
+                },
+                "event": "on_chain_stream",
+                "name": "to_document",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {},
+                "event": "on_chain_start",
+                "name": "from_document",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {
+                    "input": "foo",
+                    "output": [
+                        Document(page_content="foo", metadata={"a": "b"}),
+                        Document(page_content="oof"),
+                    ],
+                },
+                "event": "on_chain_end",
+                "name": "to_document",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {"chunk": "foo"},
+                "event": "on_chain_stream",
+                "name": "from_document",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"chunk": "foo"},
+                "event": "on_chain_stream",
+                "name": "/doc_types",
+                "tags": [],
+            },
+            {
+                "data": {
+                    "input": [
+                        Document(page_content="foo", metadata={"a": "b"}),
+                        Document(page_content="oof"),
+                    ],
+                    "output": "foo",
+                },
+                "event": "on_chain_end",
+                "name": "from_document",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"output": "foo"},
+                "event": "on_chain_end",
+                "name": "/doc_types",
+                "tags": [],
+            },
+        ]
+
+    async with get_async_remote_runnable(
+        app, raise_app_exceptions=False, path="/get_pets"
+    ) as runnable:
+        # Test good requests
+        events = [event async for event in runnable.astream_events("foo", version="v1")]
+        _clean_up_events(events)
+        assert events == [
+            {
+                "data": {"input": "foo"},
+                "event": "on_chain_start",
+                "name": "/get_pets",
+                "tags": [],
+            },
+            {
+                "data": {
+                    "chunk": [{"age": 1, "name": "foo"}, {"age": 2, "name": "bar"}]
+                },
+                "event": "on_chain_stream",
+                "name": "/get_pets",
+                "tags": [],
+            },
+            {
+                "data": {
+                    "output": [{"age": 1, "name": "foo"}, {"age": 2, "name": "bar"}]
+                },
+                "event": "on_chain_end",
+                "name": "/get_pets",
+                "tags": [],
+            },
+        ]
+
+    async with get_async_remote_runnable(
+        app, raise_app_exceptions=False, path="/break"
+    ) as runnable:
+        # Test good requests
+        with pytest.raises(httpx.HTTPStatusError) as cb:
+            async for event in runnable.astream_events("foo", version="v1"):
+                pass
+        assert cb.value.response.status_code == 500
+
+
+async def test_astream_events_with_prompt_model_parser_chain(
+    async_remote_runnable: RemoteRunnable,
+) -> None:
+    """Test prompt + model + parser chain"""
+
+    app = FastAPI()
+
+    messages = cycle([AIMessage(content="Hello World!")])
+
+    model = GenericFakeChatModel(messages=messages)
+
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", "You are a cat."), ("user", "{question}")]
+    )
+
+    chain = prompt | model | StrOutputParser()
+    add_routes(app, chain)
+
+    async with get_async_remote_runnable(app) as runnable:
+        # Test good requests
+        events = [
+            event
+            async for event in runnable.astream_events(
+                {"question": "hello"}, version="v1"
+            )
+        ]
+        _clean_up_events(events)
+        assert events == [
+            {
+                "data": {"input": {"question": "hello"}},
+                "event": "on_chain_start",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+            {
+                "data": {"input": {"question": "hello"}},
+                "event": "on_prompt_start",
+                "name": "ChatPromptTemplate",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {
+                    "input": {"question": "hello"},
+                    "output": {
+                        "messages": [
+                            SystemMessage(content="You are a cat."),
+                            HumanMessage(content="hello"),
+                        ]
+                    },
+                },
+                "event": "on_prompt_end",
+                "name": "ChatPromptTemplate",
+                "tags": ["seq:step:1"],
+            },
+            {
+                "data": {
+                    "input": {
+                        "messages": [
+                            [
+                                SystemMessage(content="You are a cat."),
+                                HumanMessage(content="hello"),
+                            ]
+                        ]
+                    }
+                },
+                "event": "on_chat_model_start",
+                "name": "GenericFakeChatModel",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {},
+                "event": "on_parser_start",
+                "name": "StrOutputParser",
+                "tags": ["seq:step:3"],
+            },
+            {
+                "data": {"chunk": "Hello"},
+                "event": "on_parser_stream",
+                "name": "StrOutputParser",
+                "tags": ["seq:step:3"],
+            },
+            {
+                "data": {"chunk": "Hello"},
+                "event": "on_chain_stream",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+            {
+                "data": {"chunk": AIMessageChunk(content="Hello")},
+                "event": "on_chat_model_stream",
+                "name": "GenericFakeChatModel",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"chunk": " "},
+                "event": "on_parser_stream",
+                "name": "StrOutputParser",
+                "tags": ["seq:step:3"],
+            },
+            {
+                "data": {"chunk": " "},
+                "event": "on_chain_stream",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+            {
+                "data": {"chunk": AIMessageChunk(content=" ")},
+                "event": "on_chat_model_stream",
+                "name": "GenericFakeChatModel",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {"chunk": "World!"},
+                "event": "on_parser_stream",
+                "name": "StrOutputParser",
+                "tags": ["seq:step:3"],
+            },
+            {
+                "data": {"chunk": "World!"},
+                "event": "on_chain_stream",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+            {
+                "data": {"chunk": AIMessageChunk(content="World!")},
+                "event": "on_chat_model_stream",
+                "name": "GenericFakeChatModel",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {
+                    "input": {
+                        "messages": [
+                            [
+                                SystemMessage(content="You are a cat."),
+                                HumanMessage(content="hello"),
+                            ]
+                        ]
+                    },
+                    "output": LLMResult(
+                        generations=[
+                            [
+                                ChatGenerationChunk(
+                                    text="Hello World!",
+                                    message=AIMessageChunk(content="Hello World!"),
+                                )
+                            ]
+                        ],
+                        llm_output=None,
+                        run=None,
+                    ),
+                },
+                "event": "on_chat_model_end",
+                "name": "GenericFakeChatModel",
+                "tags": ["seq:step:2"],
+            },
+            {
+                "data": {
+                    "input": AIMessageChunk(content="Hello World!"),
+                    "output": "Hello World!",
+                },
+                "event": "on_parser_end",
+                "name": "StrOutputParser",
+                "tags": ["seq:step:3"],
+            },
+            {
+                "data": {"output": "Hello World!"},
+                "event": "on_chain_end",
+                "name": "RunnableSequence",
+                "tags": [],
+            },
+        ]
+
+
+async def test_path_dependencies() -> None:
+    """Test path dependencies."""
+
+    def add_one(x: int) -> int:
+        """Add one to simulate a valid function"""
+        return x + 1
+
+    async def verify_token(x_token: Annotated[str, Header()]) -> None:
+        """Verify the token is valid."""
+        # Replace this with your actual authentication logic
+        if x_token != "secret-token":
+            raise HTTPException(status_code=400, detail="X-Token header invalid")
+
+    app = FastAPI()
+
+    add_routes(
+        app,
+        RunnableLambda(add_one),
+        dependencies=[Depends(verify_token)],
+        enable_feedback_endpoint=True,
+    )
+
+    endpoints_with_payload = [
+        ("POST", "/invoke", {"input": 1}),
+        ("POST", "/batch", {"inputs": [1, 2]}),
+        ("POST", "/stream", {"input": 1}),
+        ("POST", "/stream_log", {"input": 1}),
+        ("POST", "/stream_events", {"input": 1}),
+        ("GET", "/input_schema", {}),
+        ("GET", "/output_schema", {}),
+        ("GET", "/config_schema", {}),
+        ("GET", "/playground/index.html", {}),
+        # ("HEAD", "/feedback", {}),
+        # ("GET", "/feedback", {}),
+        # Check config hashes
+        ("POST", "/c/1234/invoke", {"input": 1}),
+        ("POST", "/c/1234/batch", {"inputs": [1, 2]}),
+        ("POST", "/c/1234/stream", {"input": 1}),
+        ("POST", "/c/1234/stream_log", {"input": 1}),
+        ("POST", "/c/1234/stream_events", {"input": 1}),
+        ("GET", "/c/1234/input_schema", {}),
+        ("GET", "/c/1234/output_schema", {}),
+        ("GET", "/c/1234/config_schema", {}),
+        ("GET", "/c/1234/playground/index.html", {}),
+    ]
+
+    async with get_async_test_client(app, raise_app_exceptions=False) as async_client:
+        for method, endpoint, payload in endpoints_with_payload:
+            response = await async_client.request(method, endpoint, json=payload)
+            # Missing required header
+            assert response.status_code == 422, (
+                f"Should fail on {endpoint} since we are missing the header. "
+                f"Test case: ({method}, {endpoint}, {payload}) with {response.text}"
+            )
+
+            response = await async_client.request(
+                method, endpoint, json=payload, headers={"X-Token": "secret-token"}
+            )
+            assert response.status_code not in {404, 405, 422}, (
+                f"Failed test case: ({method}, {endpoint}, {payload}) "
+                f"with {response.text}. "
+                f"Should not return 422 status code since we are passing the header."
+            )
+
+
+async def test_remote_configurable_remote_runnable() -> None:
+    """Test that a configurable a client runnable that's configurable works.
+
+    Here, we wrap the client runnable in a RunnableWithMessageHistory.
+
+    The test verifies that the extra information populated by RunnableWithMessageHistory
+    does not interfere with the serialization logic.
+    """
+    app = FastAPI()
+
+    class InMemoryHistory(BaseChatMessageHistory, BaseModel):
+        """In memory implementation of chat message history."""
+
+        messages: List[BaseMessage] = Field(default_factory=list)
+
+        def add_message(self, message: BaseMessage) -> None:
+            """Add a self-created message to the store"""
+            self.messages.append(message)
+
+        def clear(self) -> None:
+            self.messages = []
+
+    # Here we use a global variable to store the chat message history.
+    # This will make it easier to inspect it to see the underlying results.
+    store = {}
+
+    def get_by_session_id(session_id: str) -> BaseChatMessageHistory:
+        if session_id not in store:
+            store[session_id] = InMemoryHistory()
+        return store[session_id]
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You're an assistant who's good at {ability}"),
+            MessagesPlaceholder(variable_name="history"),
+            ("human", "{question}"),
+        ]
+    )
+
+    model = GenericFakeChatModel(messages=cycle([AIMessage(content="Hello World!")]))
+    chain = prompt | model
+
+    add_routes(app, chain)
+
+    # Invoke request
+    async with get_async_remote_runnable(app, raise_app_exceptions=False) as client:
+        chain_with_history = RunnableWithMessageHistory(
+            client,
+            # Uses the get_by_session_id function defined in the example
+            # above.
+            get_by_session_id,
+            input_messages_key="question",
+            history_messages_key="history",
+        )
+        result = await chain_with_history.ainvoke(
+            {"question": "hi"}, {"configurable": {"session_id": "1"}}
+        )
+        assert result == AIMessage(content="Hello World!")
+        assert store == {
+            "1": InMemoryHistory(
+                messages=[HumanMessage(content="hi"), AIMessage(content="Hello World!")]
+            )
+        }

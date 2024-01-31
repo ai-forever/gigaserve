@@ -36,6 +36,8 @@ from langchain.schema.runnable.config import (
     get_callback_manager_for_config,
 )
 from langchain.schema.runnable.utils import AddableDict, Input, Output
+from langchain_core.runnables.schema import StreamEvent
+from typing_extensions import Literal
 
 from langserve.callbacks import CallbackEventDict, ahandle_callbacks, handle_callbacks
 from langserve.serialization import (
@@ -47,10 +49,68 @@ from langserve.serialization import (
 logger = logging.getLogger(__name__)
 
 
-def _without_callbacks(config: Optional[RunnableConfig]) -> RunnableConfig:
-    """Evict callbacks from the config since those are definitely not supported."""
+def _is_json_serializable(obj: Any) -> bool:
+    """Return True if the object is json serializable."""
+    if isinstance(obj, (tuple, list, dict, str, int, float, bool, type(None))):
+        return True
+    else:
+        return False
+
+
+def _keep_json_serializable(obj: Any) -> Any:
+    """Traverse the object recursively and removes non-json serializable objects."""
+    if isinstance(obj, dict):
+        return {
+            k: _keep_json_serializable(v)
+            for k, v in obj.items()
+            if isinstance(k, str) and _is_json_serializable(v)
+        }
+    elif isinstance(obj, (list, tuple)):
+        return [_keep_json_serializable(v) for v in obj if _is_json_serializable(v)]
+    elif _is_json_serializable(obj):
+        return obj
+    else:
+        raise AssertionError("This code should not be reachable. If it's reached")
+
+
+def _prepare_config_for_server(
+    config: Optional[RunnableConfig], *, ignore_unserializable: bool = True
+) -> RunnableConfig:
+    """Evict information from the config that should not be sent to the server.
+
+    This includes:
+    - callbacks: Callbacks are handled separately
+    - non-json serializable objects: We cannot serialize then the correct behavior
+        these appear frequently in the config of the runnable but are only needed
+        in the local scope of the config (they do not need to be sent to the server).
+        An example are the write / read channel objects populated by langgraph,
+        or the 'messages' field in configurable populated by RunnableWithMessageHistory.
+
+    Args:
+        config: The config to clean up
+        ignore_unserializable: If True, will ignore non-json serializable objects
+            found in the 'configurable' field of the config.
+            This is expected to be the safe default to use since the server
+            should not be specifying configurable objects that are not json
+            serializable. This logic is expected mostly to with non serializable
+            content that was created for local use by the runnable, and
+            is not needed by the server.
+            If False, will raise an error if a non-json serializable object is found.
+
+    Returns:
+        A cleaned up version of the config that can be sent to the server.
+    """
     _config = config or {}
-    return {k: v for k, v in _config.items() if k != "callbacks"}
+    without_callbacks = {k: v for k, v in _config.items() if k != "callbacks"}
+    if "configurable" in without_callbacks:
+        # Get a version of
+
+        if ignore_unserializable:
+            without_callbacks["configurable"] = _keep_json_serializable(
+                without_callbacks["configurable"]
+            )
+
+    return without_callbacks
 
 
 @lru_cache(maxsize=1_000)  # Will accommodate up to 1_000 different error messages
@@ -275,7 +335,7 @@ class RemoteRunnable(Runnable[Input, Output]):
             "/invoke",
             json={
                 "input": self._lc_serializer.dumpd(input),
-                "config": _without_callbacks(config),
+                "config": _prepare_config_for_server(config),
                 "kwargs": kwargs,
             },
         )
@@ -306,7 +366,7 @@ class RemoteRunnable(Runnable[Input, Output]):
             "/invoke",
             json={
                 "input": self._lc_serializer.dumpd(input),
-                "config": _without_callbacks(config),
+                "config": _prepare_config_for_server(config),
                 "kwargs": kwargs,
             },
         )
@@ -341,9 +401,9 @@ class RemoteRunnable(Runnable[Input, Output]):
             )
 
         if isinstance(config, list):
-            _config = [_without_callbacks(c) for c in config]
+            _config = [_prepare_config_for_server(c) for c in config]
         else:
-            _config = _without_callbacks(config)
+            _config = _prepare_config_for_server(config)
 
         response = self.sync_client.post(
             "/batch",
@@ -394,9 +454,9 @@ class RemoteRunnable(Runnable[Input, Output]):
             )
 
         if isinstance(config, list):
-            _config = [_without_callbacks(c) for c in config]
+            _config = [_prepare_config_for_server(c) for c in config]
         else:
-            _config = _without_callbacks(config)
+            _config = _prepare_config_for_server(config)
 
         response = await self.async_client.post(
             "/batch",
@@ -458,7 +518,7 @@ class RemoteRunnable(Runnable[Input, Output]):
         )
         data = {
             "input": self._lc_serializer.dumpd(input),
-            "config": _without_callbacks(config),
+            "config": _prepare_config_for_server(config),
             "kwargs": kwargs,
         }
         endpoint = urljoin(self.url, "stream")
@@ -544,7 +604,7 @@ class RemoteRunnable(Runnable[Input, Output]):
         )
         data = {
             "input": self._lc_serializer.dumpd(input),
-            "config": _without_callbacks(config),
+            "config": _prepare_config_for_server(config),
             "kwargs": kwargs,
         }
         endpoint = urljoin(self.url, "stream")
@@ -646,7 +706,7 @@ class RemoteRunnable(Runnable[Input, Output]):
         )
         data = {
             "input": self._lc_serializer.dumpd(input),
-            "config": _without_callbacks(config),
+            "config": _prepare_config_for_server(config),
             "kwargs": kwargs,
             "diff": True,
             "include_names": include_names,
@@ -699,3 +759,102 @@ class RemoteRunnable(Runnable[Input, Output]):
             raise
         else:
             await run_manager.on_chain_end(final_output)
+
+    async def astream_events(
+        self,
+        input: Any,
+        config: Optional[RunnableConfig] = None,
+        *,
+        version: Literal["v1"],
+        include_names: Optional[Sequence[str]] = None,
+        include_types: Optional[Sequence[str]] = None,
+        include_tags: Optional[Sequence[str]] = None,
+        exclude_names: Optional[Sequence[str]] = None,
+        exclude_types: Optional[Sequence[str]] = None,
+        exclude_tags: Optional[Sequence[str]] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream events from the server runnable.
+
+        **Attention**: This method is using a beta API and may change slightly.
+
+        This method can stream events from any step used in the runnable exposed
+        on the server. This includes all inner runs of LLMs, Retrievers, Tools, etc.
+
+        **Recommended**: Only ask for the data you need. This can significantly
+        reduce the amount of data sent over the wire.
+
+        Args:
+            input: The input to the runnable
+            config: The config to use for the runnable
+            version: The version of the astream_events to use.
+                     Currently only "v1" is supported.
+            include_names: The names of the events to include
+            include_types: The types of the events to include
+            include_tags: The tags of the events to include
+            exclude_names: The names of the events to exclude
+            exclude_types: The types of the events to exclude
+            exclude_tags: The tags of the events to exclude
+        """
+        if version != "v1":
+            raise ValueError(f"Unsupported version: {version}. Use 'v1'")
+
+        # Create a stream handler that will emit Log objects
+        config = ensure_config(config)
+        callback_manager = get_async_callback_manager_for_config(config)
+
+        events = []
+
+        run_manager = await callback_manager.on_chain_start(
+            dumpd(self),
+            self._lc_serializer.dumpd(input),
+            name=config.get("run_name"),
+        )
+        data = {
+            "input": self._lc_serializer.dumpd(input),
+            "config": _prepare_config_for_server(config),
+            "kwargs": kwargs,
+            "include_names": include_names,
+            "include_types": include_types,
+            "include_tags": include_tags,
+            "exclude_names": exclude_names,
+            "exclude_types": exclude_types,
+            "exclude_tags": exclude_tags,
+        }
+        endpoint = urljoin(self.url, "stream_events")
+
+        try:
+            from httpx_sse import aconnect_sse
+        except ImportError:
+            raise ImportError("You must install `httpx_sse` to use the stream method.")
+
+        try:
+            async with aconnect_sse(
+                self.async_client, "POST", endpoint, json=data
+            ) as event_source:
+                async for sse in event_source.aiter_sse():
+                    if sse.event == "data":
+                        event = self._lc_serializer.loads(sse.data)
+                        # Create a copy of the data to yield since underlying
+                        # code is using jsonpatch which does some stuff in-place
+                        # that can cause unexpected consequences.
+                        yield event
+                        events.append(event)
+                    elif sse.event == "error":
+                        # This can only be a server side error
+                        _raise_exception_from_data(
+                            sse.data, httpx.Request(method="POST", url=endpoint)
+                        )
+                    elif sse.event == "end":
+                        break
+                    else:
+                        _log_error_message_once(
+                            f"Encountered an unsupported event type: `{sse.event}`. "
+                            f"Try upgrading the remote client to the latest version."
+                            f"Ignoring events of type `{sse.event}`."
+                        )
+        except BaseException as e:
+            await run_manager.on_chain_error(e)
+            raise
+        else:
+            await run_manager.on_chain_end(events)

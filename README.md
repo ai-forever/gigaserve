@@ -71,7 +71,6 @@ from langchain.chat_models import GigaChat, ChatAnthropic, ChatOpenAI
 
 from langserve import add_routes
 
-
 app = FastAPI(
   title="GigaChain Server",
   version="1.0",
@@ -169,10 +168,10 @@ chain.batch([{ "topic": "попугаи" }, { "topic": "кошки" }])
 Пример клиента на TypeScript (для работы клиента требуется LangChain.js версии 0.0.166 или выше):
 
 ```typescript
-import { RemoteRunnable } from "langchain/runnables/remote";
+import {RemoteRunnable} from "langchain/runnables/remote";
 
 const chain = new RemoteRunnable({
-  url: `http://localhost:8000/joke/`,
+    url: `http://localhost:8000/joke/`,
 });
 const result = await chain.invoke({
   topic: "кошки",
@@ -183,6 +182,7 @@ const result = await chain.invoke({
 
 ```python
 import requests
+
 response = requests.post(
     "http://localhost:8000/joke/invoke/",
     json={'input': {'topic': 'кошки'}}
@@ -209,9 +209,9 @@ curl --location --request POST 'http://localhost:8000/joke/invoke' \
 ```python
 ...
 add_routes(
-  app,
-  runnable,
-  path="/my_runnable",
+    app,
+    runnable,
+    path="/my_runnable",
 )
 ```
 
@@ -244,6 +244,9 @@ add_routes(
 Кроме этого, если цепочка может настраиваться, песочница предоставляет задать параметры цепочки и поделиться ссылкой на полученную конфигурацию.
 
 ### Обмен конфигурацией цепочки
+
+In addition, for configurable runnables, the playground will allow you to configure the
+runnable and share a link with the configuration:
 
 <p align="center">
 <img src="https://github.com/langchain-ai/langserve/assets/3205522/86ce9c59-f8e4-4d08-9fa3-62030e0f521d" width="50%"/>
