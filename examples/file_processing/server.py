@@ -10,7 +10,7 @@ issue is that the base64 encoding incurs an additional encoding/decoding
 overhead.
 
 This example also specifies a "base64file" widget, which will create a widget
-allowing one to upload a binary file using the langserve playground UI.
+allowing one to upload a binary file using the GigaServe playground UI.
 """
 import base64
 

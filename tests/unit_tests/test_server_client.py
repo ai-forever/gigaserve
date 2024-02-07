@@ -739,11 +739,13 @@ async def test_astream_log_diff_no_effect(
                 },
             }
         ],
-        [{"op": "replace", "path": "/final_output", "value": {"output": 2}}],
-        [{"op": "add", "path": "/streamed_output/-", "value": 2}],
+        [
+            {"op": "add", "path": "/streamed_output/-", "value": 2},
+            {"op": "replace", "path": "/final_output", "value": 2},
+        ],
     ]
     assert _get_run_log(run_logs).state == {
-        "final_output": {"output": 2},
+        "final_output": 2,
         "id": uuid,
         "logs": {},
         "streamed_output": [2],
@@ -809,12 +811,14 @@ async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
                     },
                 }
             ],
-            [{"op": "replace", "path": "/final_output", "value": {"output": 2}}],
-            [{"op": "add", "path": "/streamed_output/-", "value": 2}],
+            [
+                {"op": "add", "path": "/streamed_output/-", "value": 2},
+                {"op": "replace", "path": "/final_output", "value": 2},
+            ],
         ]
 
         assert _get_run_log(run_log_patches).state == {
-            "final_output": {"output": 2},
+            "final_output": 2,
             "id": uuid,
             "logs": {},
             "streamed_output": [2],
