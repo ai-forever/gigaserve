@@ -3998,5 +3998,5 @@ server = ["fastapi", "sse-starlette"]
 
 [metadata]
 lock-version = "2.0"
-python-versions = "^3.8.1"
-content-hash = "e8ee7de260cbed059424da8985f2ea90958fc8b70ddf9b24047465f957dff1ad"
+python-versions = ">=3.8.1,<4.0"
+content-hash = "63eba0597deada336c376e42aa4998801b755a78664050f5c658cc8450ec4ae9"
