@@ -113,6 +113,7 @@ EndpointName = Literal[
     "stream_events",
     "playground",
     "feedback",
+    "public_trace_link",
     "input_schema",
     "config_schema",
     "output_schema",
@@ -129,6 +130,7 @@ KNOWN_ENDPOINTS = {
     "stream_events",
     "playground",
     "feedback",
+    "public_trace_link",
     "input_schema",
     "config_schema",
     "output_schema",
@@ -145,6 +147,7 @@ class _EndpointConfiguration:
         enabled_endpoints: Optional[Sequence[EndpointName]] = None,
         disabled_endpoints: Optional[Sequence[EndpointName]] = None,
         enable_feedback_endpoint: bool = False,
+        enable_public_trace_link_endpoint: bool = False,
     ) -> None:
         """Initialize the endpoint configuration."""
         if enabled_endpoints and disabled_endpoints:
@@ -223,6 +226,7 @@ class _EndpointConfiguration:
         self.is_config_schema_enabled = is_config_schema_enabled
         self.is_config_hash_enabled = is_config_hash_enabled
         self.is_feedback_enabled = enable_feedback_endpoint
+        self.is_public_trace_link_enabled = enable_public_trace_link_endpoint
 
 
 # PUBLIC API
@@ -239,10 +243,12 @@ def add_routes(
     include_callback_events: bool = False,
     per_req_config_modifier: Optional[PerRequestConfigModifier] = None,
     enable_feedback_endpoint: bool = _is_hosted(),
+    enable_public_trace_link_endpoint: bool = False,
     disabled_endpoints: Optional[Sequence[EndpointName]] = None,
     stream_log_name_allow_list: Optional[Sequence[str]] = None,
     enabled_endpoints: Optional[Sequence[EndpointName]] = None,
     dependencies: Optional[Sequence[Depends]] = None,
+    playground_type: Literal["default", "chat"] = "default",
 ) -> None:
     """Register the routes on the given FastAPI app or APIRouter.
 
@@ -290,12 +296,18 @@ def add_routes(
         enable_feedback_endpoint: Whether to enable an endpoint for logging feedback
             to LangSmith. Enabled by default. If this flag is disabled or LangSmith
             tracing is not enabled for the runnable, then 400 errors will be thrown
-            when accessing the feedback endpoint
+            when accessing the feedback endpoint.
+        enable_public_trace_link_endpoint: Whether to enable an endpoint for
+            end-users to publicly view LangSmith traces of your chain runs.
+            WARNING: THIS WILL EXPOSE THE INTERNAL STATE OF YOUR RUN AND CHAIN AS
+            A PUBLICLY ACCESSIBLE LINK.
+            If this flag is disabled or LangSmith tracing is not enabled for
+            the runnable, then 400 errors will be thrown when accessing the endpoint.
         enabled_endpoints: A list of endpoints which should be enabled. If not
             specified, all associated endpoints will be enabled. The list can contain
             the following values: *invoke*, *batch*, *stream*, *stream_log*,
-            *playground*, *input_schema*, *output_schema*, *config_schema*,
-            *config_hashes*.
+            *playground*, *input_schema*, *output_schema*,
+            *config_schema*, *config_hashes*.
 
             *config_hashes* represents the config hash variant (when it exists)
             of each endpoint. Enabling this is useful when working with configurable
@@ -312,13 +324,14 @@ def add_routes(
             )
             ```
 
-            Please note that the feedback endpoint is not included in this list
-            and is controlled by the `enable_feedback_endpoint` flag.
+            Please note that the feedback endpoint and public trace link endpoints
+            are not included in this list and are controlled by their
+            respective flags.
         disabled_endpoints: A list of endpoints which should be disabled. If not
             specified, all associated endpoints will be enabled. The list can contain
             the following values: *invoke*, *batch*, *stream*, *stream_log*,
-            *playground*, *input_schema*, *output_schema*, *config_schema*,
-            *config_hashes*.
+            *playground*, *input_schema*, *output_schema*,
+            *config_schema*, *config_hashes*.
 
             *config_hashes* represents the config hash variant (when it exists)
             of each endpoint. Enabling this is useful when working with configurable
@@ -338,11 +351,18 @@ def add_routes(
             stream as intermediate steps
         dependencies: list of dependencies to be applied to the *path operation*.
             See [FastAPI docs for Dependencies in path operation decorators](https://fastapi.tiangolo.com/tutorial/dependencies/dependencies-in-path-operation-decorators/).
+        playground_type: The type of playground to serve. The default is "default".
+            - default: supports more types of inputs / outputs. Not optimized
+              for any particular use case.
+            - chat: UX is optimized for chat-like interactions. Please review
+              the README in langserve for more details about constraints (e.g.,
+              which message types are supported etc.)
     """  # noqa: E501
     endpoint_configuration = _EndpointConfiguration(
         enabled_endpoints=enabled_endpoints,
         disabled_endpoints=disabled_endpoints,
         enable_feedback_endpoint=enable_feedback_endpoint,
+        enable_public_trace_link_endpoint=enable_public_trace_link_endpoint,
     )
 
     try:
@@ -386,8 +406,10 @@ def add_routes(
         config_keys=config_keys,
         include_callback_events=include_callback_events,
         enable_feedback_endpoint=enable_feedback_endpoint,
+        enable_public_trace_link_endpoint=enable_public_trace_link_endpoint,
         per_req_config_modifier=per_req_config_modifier,
         stream_log_name_allow_list=stream_log_name_allow_list,
+        playground_type=playground_type,
     )
     namespace = path or ""
 
@@ -668,13 +690,16 @@ def add_routes(
 
     if endpoint_configuration.is_playground_enabled:
         playground = app.get(
-            namespace + "/playground/{file_path:path}", dependencies=dependencies
+            namespace + "/playground/{file_path:path}",
+            dependencies=dependencies,
+            include_in_schema=False,
         )(api_handler.playground)
 
         if endpoint_configuration.is_config_hash_enabled:
             app.get(
                 namespace + "/c/{config_hash}/playground/{file_path:path}",
                 dependencies=dependencies,
+                include_in_schema=False,
             )(playground)
 
     if enable_feedback_endpoint:
@@ -687,6 +712,17 @@ def add_routes(
             namespace + "/feedback",
             dependencies=dependencies,
         )(api_handler._check_feedback_enabled)
+
+    if enable_public_trace_link_endpoint:
+        app.put(
+            namespace + "/public_trace_link",
+            dependencies=dependencies,
+        )(api_handler.create_public_trace_link)
+
+        app.head(
+            namespace + "/public_trace_link",
+            dependencies=dependencies,
+        )(api_handler._check_public_trace_link_enabled)
 
     #######################################
     # Documentation variants of end points.
@@ -826,6 +862,7 @@ def add_routes(
                 include_in_schema=True,
                 tags=route_tags,
                 name=_route_name("stream"),
+                dependencies=dependencies,
                 description=(
                     "This endpoint allows to stream the output of the runnable. "
                     "The endpoint uses a server sent event stream to stream the "

@@ -162,3 +162,5 @@ cython_debug/
 .envrc
 
 .vscode/
+# IntelliJ IDE's
+.idea

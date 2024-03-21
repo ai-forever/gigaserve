@@ -168,7 +168,7 @@ chain.batch([{ "topic": "попугаи" }, { "topic": "кошки" }])
 Пример клиента на TypeScript (для работы клиента требуется LangChain.js версии 0.0.166 или выше):
 
 ```typescript
-import {RemoteRunnable} from "langchain/runnables/remote";
+import { RemoteRunnable } from "@langchain/core/runnables/remote";
 
 const chain = new RemoteRunnable({
     url: `http://localhost:8000/joke/`,
@@ -341,7 +341,7 @@ def func(x: Any) -> int:
 
 
 runnable = RunnableLambda(func).with_types(
-    input_schema=int,
+    input_type=int,
 )
 
 add_routes(app, runnable)
@@ -493,13 +493,13 @@ add_routes(
 Пример ниже включает варианты эндпоинтов `invoke`, `batch` и `config_hash`.
 
 ```python
-add_routes(app, chain, enabled_endpoints=["invoke", "batch", "config_hashes"])
+add_routes(app, chain, enabled_endpoints=["invoke", "batch", "config_hashes"], path="/mychain")
 ```
 
 Пример ниже отключает страницу песочницы для цепочки.
 
 ```python
-add_routes(app, chain, disabled_endpoints=["playground"])
+add_routes(app, chain, disabled_endpoints=["playground"], path="/mychain")
 ```
 
 ## Безопасность

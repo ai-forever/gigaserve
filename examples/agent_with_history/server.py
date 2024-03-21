@@ -6,13 +6,23 @@ In this example, the history is stored entirely on the client's side.
 Please see other examples in LangServe on how to use RunnableWithHistory to
 store history on the server side.
 
-In addition, see agent documentation in LangChain:
+Relevant LangChain documentation:
 
-https://python.langchain.com/docs/modules/agents/how_to/custom_agent
+* Creating a custom agent: https://python.langchain.com/docs/modules/agents/how_to/custom_agent
+* Streaming with agents: https://python.langchain.com/docs/modules/agents/how_to/streaming#custom-streaming-with-events
+* General streaming documentation: https://python.langchain.com/docs/expression_language/streaming
+* Message History: https://python.langchain.com/docs/expression_language/how_to/message_history
 
-**ATTENTION** This exampl does not truncate message history, so it will crash
-if you send too many messages (exceed token length).
-"""
+**ATTENTION**
+1. To support streaming individual tokens you will need to use the astream events
+   endpoint rather than the streaming endpoint.
+2. This example does not truncate message history, so it will crash if you
+   send too many messages (exceed token length).
+3. The playground at the moment does not render agent output well! If you want to
+   use the playground you need to customize it's output server side using astream
+   events by wrapping it within another runnable.
+4. See the client notebook it has an example of how to use stream_events client side!
+"""  # noqa: E501
 from typing import Any, List, Union
 
 from fastapi import FastAPI
@@ -28,10 +38,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from langserve import add_routes
-from langserve.pydantic_v1 import BaseModel
-
-MEMORY_KEY = "chat_history"
-
+from langserve.pydantic_v1 import BaseModel, Field
 
 prompt = ChatPromptTemplate.from_messages(
     [
@@ -41,7 +48,15 @@ prompt = ChatPromptTemplate.from_messages(
             "Talk with the user as normal. "
             "If they ask you to calculate the length of a word, use a tool",
         ),
-        MessagesPlaceholder(variable_name=MEMORY_KEY),
+        # Please note the ordering of the fields in the prompt!
+        # The correct ordering is:
+        # 1. history - the past messages between the user and the agent
+        # 2. user - the user's current input
+        # 3. agent_scratchpad - the agent's working space for thinking and
+        #    invoking tools to respond to the user's input.
+        # If you change the ordering, the agent will not work correctly since
+        # the messages will be shown to the underlying LLM in the wrong order.
+        MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
         MessagesPlaceholder(variable_name="agent_scratchpad"),
     ]
@@ -55,8 +70,10 @@ def word_length(word: str) -> int:
 
 
 # We need to set streaming=True on the LLM to support streaming individual tokens.
-# when using the stream_log endpoint.
-# .stream for agents streams action observation pairs not individual tokens.
+# Tokens will be available when using the stream_log / stream events endpoints,
+# but not when using the stream endpoint since the stream implementation for agent
+# streams action observation pairs not individual tokens.
+# See the client notebook that shows how to use the stream events endpoint.
 llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0, streaming=True)
 
 tools = [word_length]
@@ -98,7 +115,7 @@ agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 app = FastAPI(
     title="LangChain Server",
     version="1.0",
-    description="Spin up a simple api server using Langchain's Runnable interfaces",
+    description="Spin up a simple api server using LangChain's Runnable interfaces",
 )
 
 
@@ -106,7 +123,16 @@ app = FastAPI(
 # is lacking in schemas.
 class Input(BaseModel):
     input: str
-    chat_history: List[Union[HumanMessage, AIMessage, FunctionMessage]]
+    # The field extra defines a chat widget.
+    # Please see documentation about widgets in the main README.
+    # The widget is used in the playground.
+    # Keep in mind that playground support for agents is not great at the moment.
+    # To get a better experience, you'll need to customize the streaming output
+    # for now.
+    chat_history: List[Union[HumanMessage, AIMessage, FunctionMessage]] = Field(
+        ...,
+        extra={"widget": {"type": "chat", "input": "input", "output": "output"}},
+    )
 
 
 class Output(BaseModel):
@@ -117,7 +143,13 @@ class Output(BaseModel):
 # /invoke
 # /batch
 # /stream
-add_routes(app, agent_executor.with_types(input_type=Input, output_type=Output))
+# /stream_events
+add_routes(
+    app,
+    agent_executor.with_types(input_type=Input, output_type=Output).with_config(
+        {"run_name": "agent"}
+    ),
+)
 
 if __name__ == "__main__":
     import uvicorn

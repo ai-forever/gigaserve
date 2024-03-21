@@ -1,13 +1,13 @@
 [tool.poetry]
 name = "gigaserve"
-version = "0.0.42"
+version = "0.0.51"
 description = ""
 readme = "README.md"
 authors = ["LangChain", "GigaChain"]
 license = "LangServe"
 repository = "https://github.com/ai-forever/gigaserve"
-exclude = ["langserve/playground"]
-include = ["langserve/playground/dist/**/*"]
+exclude = ["langserve/playground,langserve/chat_playground"]
+include = ["langserve/playground/dist/**/*", "langserve/chat_playground/dist/**/*"]
 packages = [
     {include = "langserve"}
 ]
@@ -19,7 +19,7 @@ fastapi = {version = ">=0.90.1,<1", optional = true}
 sse-starlette = {version = "^1.3.0", optional = true}
 httpx-sse = {version = ">=0.3.1", optional = true}
 pydantic = ">=1.1.13,<2"
-gigachain = "^0.1.4"
+gigachain = "^0.1.12"
 orjson = ">=2"
 
 [tool.poetry.group.dev.dependencies]

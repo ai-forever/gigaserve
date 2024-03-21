@@ -1,2 +1,2 @@
-# GigaServe Playground 🦜️🔗
+# GigaServe Playground 🦜️🏓
 
