@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel  # Floats between v1 and v2
 
 from langserve.pydantic_v1 import BaseModel as BaseModelV1
+from langserve.pydantic_v1 import Field
 
 
 class CustomUserType(BaseModelV1):
@@ -41,14 +42,35 @@ class SharedResponseMetadata(BaseModelV1):
     pass
 
 
-class SingletonResponseMetadata(SharedResponseMetadata):
-    """
-    Represents response metadata used for just single input/output LangServe
+class FeedbackToken(BaseModelV1):
+    """Represents the feedback tokens for a given request."""
+
+    key: str  # The key of the feedback token
+    token_url: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
+class InvokeResponseMetadata(SharedResponseMetadata):
+    """Represents response metadata used for just single input/output LangServe
     responses.
     """
 
     # Represents the parent run id for a given request
     run_id: UUID
+    feedback_tokens: List[FeedbackToken] = Field(
+        ...,
+        description=(
+            "Feedback tokens from the given run."
+            "These tokens allow a user to provide feedback on the run."
+            "Only available if server was configured to provide feedback tokens."
+        ),
+    )
+
+
+# Alias for backwards compatibility
+# Keep here in case clients are somehow using this for type checking
+# TODO(Deprecate): This should be deprecated in 2025.
+SingletonResponseMetadata = InvokeResponseMetadata
 
 
 class BatchResponseMetadata(SharedResponseMetadata):
@@ -57,17 +79,25 @@ class BatchResponseMetadata(SharedResponseMetadata):
     responses.
     """
 
+    # This namespace can include any additional metadata that is shared
+    # across all responses in the batch (e.g., if a batch run
+    # ID was a thing, it would go here)
+
+    # metadata for each individual response in the batch
+    # Parallel list of InvokeResponseMetadata objects matching
+    # the individual requests in the batch
+    responses: List[InvokeResponseMetadata]
+
+    # A list of UUIDs
     # Represents each parent run id for a given request, in
     # the same order in which they were received
-    run_ids: List[UUID]
+    run_ids: List[UUID]  # For backwards compatibility, clients should not use this
 
 
 class BaseFeedback(BaseModel):
-    """
-    Shared information between create requests of feedback and feedback objects
-    """
+    """Shared information between create requests of feedback and feedback objects"""
 
-    run_id: UUID
+    run_id: Optional[UUID]
     """The associated run ID this feedback is logged for."""
 
     key: str
@@ -83,18 +113,34 @@ class BaseFeedback(BaseModel):
     """Comment or explanation for the feedback."""
 
 
-class FeedbackCreateRequest(BaseFeedback):
-    """
-    Represents a request that creates feedback for an individual run
-    """
+class FeedbackCreateRequestTokenBased(BaseModel):
+    """Shared information between create requests of feedback and feedback objects."""
 
-    pass
+    token_or_url: Union[UUID, str]
+    """The associated run ID this feedback is logged for."""
+
+    score: Optional[Union[float, int, bool]] = None
+    """Value or score to assign the run."""
+
+    value: Optional[Union[float, int, bool, str, Dict]] = None
+    """The display value for the feedback if not a metric."""
+
+    comment: Optional[str] = None
+    """Comment or explanation for the feedback."""
+
+    correction: Optional[Dict] = None
+    """Correction for the run."""
+
+    metadata: Optional[Dict] = None
+    """Metadata for the feedback."""
+
+
+class FeedbackCreateRequest(BaseFeedback):
+    """Represents a request that creates feedback for an individual run"""
 
 
 class Feedback(BaseFeedback):
-    """
-    Represents feedback given on an individual run
-    """
+    """Represents feedback given on an individual run"""
 
     id: UUID
     """The unique ID of the feedback that was created."""
@@ -110,9 +156,7 @@ class Feedback(BaseFeedback):
 
 
 class PublicTraceLinkCreateRequest(BaseModel):
-    """
-    Represents a request that creates a public trace for an individual run
-    """
+    """Represents a request that creates a public trace for an individual run."""
 
     run_id: UUID
     """The unique ID of the run to share."""
