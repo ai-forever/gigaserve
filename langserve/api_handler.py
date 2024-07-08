@@ -1,9 +1,11 @@
+import asyncio
 import contextlib
 import importlib
 import inspect
 import json
 import os
 import re
+import uuid
 from inspect import isclass
 from typing import (
     Any,
@@ -12,6 +14,7 @@ from typing import (
     Callable,
     Dict,
     Generator,
+    List,
     Literal,
     Mapping,
     Optional,
@@ -24,15 +27,22 @@ from typing import (
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from langchain.callbacks.base import AsyncCallbackHandler
-from langchain.callbacks.tracers.log_stream import RunLogPatch
-from langchain.load.serializable import Serializable
-from langchain.schema.runnable import Runnable, RunnableConfig
-from langchain.schema.runnable.config import get_config_list, merge_configs
+from langchain_core._api.beta_decorator import warn_beta
+from langchain_core.callbacks.base import AsyncCallbackHandler
+from langchain_core.load.serializable import Serializable
+from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables.config import (
+    get_config_list,
+    merge_configs,
+    run_in_executor,
+)
+from langchain_core.tracers import RunLogPatch
 from langsmith import client as ls_client
+from langsmith.schemas import FeedbackIngestToken
 from langsmith.utils import tracing_is_enabled
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from typing_extensions import TypedDict
 
 from langserve.callbacks import AsyncEventAggregatorCallback, CallbackEventDict
 from langserve.lzstring import LZString
@@ -43,9 +53,11 @@ from langserve.schema import (
     CustomUserType,
     Feedback,
     FeedbackCreateRequest,
+    FeedbackCreateRequestTokenBased,
+    FeedbackToken,
+    InvokeResponseMetadata,
     PublicTraceLink,
     PublicTraceLinkCreateRequest,
-    SingletonResponseMetadata,
 )
 from langserve.serialization import WellKnownLCSerializer
 from langserve.validation import (
@@ -104,6 +116,39 @@ def _strip_internal_keys(metadata: Dict[str, Any]) -> Dict[str, Any]:
     These keys are defined to be any key that starts with "__".
     """
     return {k: v for k, v in metadata.items() if not k.startswith("__")}
+
+
+def _create_metadata_event(
+    run_id: Optional[uuid.UUID] = None,
+    feedback_key: Optional[str] = None,
+    feedback_ingest_token: Optional[FeedbackIngestToken] = None,
+) -> Dict[str, Any]:
+    """Create a metadata event with the given type and metadata."""
+    data = {
+        "run_id": str(run_id) if run_id else None,
+    }
+    if feedback_ingest_token:
+        if not feedback_key:
+            raise ValueError("Feedback key must be provided if feedback token is given")
+
+        if feedback_ingest_token.expires_at:
+            expires_at = feedback_ingest_token.expires_at.isoformat()
+        else:
+            expires_at = None
+
+        data["feedback_tokens"] = [
+            {
+                "key": feedback_key,
+                "token_url": feedback_ingest_token.url,
+                "expires_at": expires_at,
+            }
+        ]
+
+    metadata = {
+        "event": "metadata",
+        "data": json.dumps(data),
+    }
+    return metadata
 
 
 async def _unpack_request_config(
@@ -218,11 +263,18 @@ def _update_config_with_defaults(
     # merge_configs is last-writer-wins, so we specifically pass in the
     # overridable configs first, then the user provided configs, then
     # finally the non-overridable configs
-    return merge_configs(
+    config = merge_configs(
         overridable_default_config,
         incoming_config,
         non_overridable_default_config,
     )
+
+    # run_id may have been set by user (and accepted by server) or
+    # it may have been by the user on the server request path.
+    # If it's not set, we'll generate a new one.
+    if "run_id" not in config or config["run_id"] is None:
+        config["run_id"] = str(uuid.uuid4())
+    return config
 
 
 def _unpack_input(validated_model: BaseModel) -> Any:
@@ -314,7 +366,11 @@ def _add_namespace_to_model(namespace: str, model: Type[BaseModel]) -> Type[Base
         A new model with name prepended with the given namespace.
     """
     model_with_unique_name = _rename_pydantic_model(model, namespace)
-    model_with_unique_name.update_forward_refs()
+    if "run_id" in model_with_unique_name.__annotations__:
+        # Help resolve reference by providing namespace references
+        model_with_unique_name.update_forward_refs(uuid=uuid)
+    else:
+        model_with_unique_name.update_forward_refs()
     return model_with_unique_name
 
 
@@ -348,23 +404,6 @@ def _with_validation_error_translation() -> Generator[None, None, None]:
         yield
     except ValidationError as e:
         raise RequestValidationError(e.errors(), body=e.model)
-
-
-def _get_base_run_id_as_str(
-    event_aggregator: AsyncEventAggregatorCallback,
-) -> Optional[str]:
-    """
-    Uses `event_aggregator` to determine the base run ID for a given run. Returns
-    the run_id as a string, or None if it does not exist.
-    """
-    # The first run in the callback_events list corresponds to the
-    # overall trace for request
-    if event_aggregator.callback_events and event_aggregator.callback_events[0].get(
-        "run_id"
-    ):
-        return str(event_aggregator.callback_events[0].get("run_id"))
-    else:
-        raise AssertionError("No run_id found for the given run")
 
 
 def _json_encode_response(model: BaseModel) -> JSONResponse:
@@ -438,7 +477,23 @@ _MODEL_REGISTRY = {}
 _SEEN_NAMES = set()
 
 
+class PerKeyFeedbackConfig(TypedDict):
+    """Per feedback configuration.
+
+    Use to configure the feedback token.
+    """
+
+    key: str
+
+
 # PUBLIC API
+class TokenFeedbackConfig(TypedDict):
+    """Token feedback configuration.
+
+    This is used to configure the feedback tokens.
+    """
+
+    key_configs: List[PerKeyFeedbackConfig]
 
 
 class APIHandler:
@@ -464,6 +519,10 @@ class APIHandler:
         config_keys: Sequence[str] = ("configurable",),
         include_callback_events: bool = False,
         enable_feedback_endpoint: bool = False,
+        # token feedback config configures **token** based feedback which
+        # is different from the feedback endpoint.
+        # Read the documentation for more details
+        token_feedback_config: Optional[TokenFeedbackConfig] = None,
         enable_public_trace_link_endpoint: bool = False,
         per_req_config_modifier: Optional[PerRequestConfigModifier] = None,
         stream_log_name_allow_list: Optional[Sequence[str]] = None,
@@ -506,6 +565,11 @@ class APIHandler:
                 to LangSmith. Disabled by default. If this flag is disabled or LangSmith
                 tracing is not enabled for the runnable, then 4xx errors will be thrown
                 when accessing the feedback endpoint
+                **Attention** this is distinct from `token_feedback_config`.
+            token_feedback_config: optional configuration for token based feedback.
+                **Attention** this is distinct from `enable_feedback_endpoint`.
+                When provided, feedback tokens will be included in the response
+                metadata that can be used to provide feedback on the run.
             enable_public_trace_link_endpoint:  Whether to enable an endpoint for
                 end-users to publicly view LangSmith traces of your chain runs.
                 WARNING: THIS WILL EXPOSE THE INTERNAL STATE OF YOUR RUN AND CHAIN AS
@@ -562,11 +626,27 @@ class APIHandler:
         self._enable_public_trace_link_endpoint = enable_public_trace_link_endpoint
         self._names_in_stream_allow_list = stream_log_name_allow_list
 
+        if token_feedback_config:
+            if len(token_feedback_config["key_configs"]) != 1:
+                raise NotImplementedError(
+                    "Only one key is supported for now for token feedback "
+                    "configuration. For example specify: "
+                    "{'key_configs': [{'key': 'correctness'}]}"
+                )
+
+            warn_beta(
+                message="Token feedback is in beta. This API may change in the future."
+            )
+
+        self._token_feedback_config = token_feedback_config
+        self._token_feedback_enabled = token_feedback_config is not None
+
         # Client is patched using mock.patch, if changing the names
         # remember to make relevant updates in the unit tests.
         self._langsmith_client = (
             ls_client.Client()
-            if tracing_is_enabled() and enable_feedback_endpoint
+            if tracing_is_enabled()
+            and (enable_feedback_endpoint or self._token_feedback_enabled)
             else None
         )
 
@@ -617,9 +697,11 @@ class APIHandler:
         )
         # Generate the response models
         self._InvokeResponse = create_invoke_response_model(
-            model_namespace, output_type_
+            model_namespace, output_type_, include_callback_events
         )
-        self._BatchResponse = create_batch_response_model(model_namespace, output_type_)
+        self._BatchResponse = create_batch_response_model(
+            model_namespace, output_type_, include_callback_events
+        )
         self.playground_type = playground_type
 
     @property
@@ -723,10 +805,33 @@ class APIHandler:
             endpoint="invoke",
             server_config=server_config,
         )
+        run_id = config["run_id"]
 
         event_aggregator = AsyncEventAggregatorCallback()
         _add_callbacks(config, [event_aggregator])
-        output = await self._runnable.ainvoke(input_, config=config)
+
+        invoke_coro = self._runnable.ainvoke(
+            input_,
+            config=config,
+        )
+
+        feedback_key: Optional[str]
+
+        # If there's feedback enabled, let's create a presigned feedback token
+        if self._token_feedback_enabled:
+            feedback_key = self._token_feedback_config["key_configs"][0]["key"]
+            feedback_coro = run_in_executor(
+                None,
+                self._langsmith_client.create_presigned_feedback_token,
+                run_id,
+                feedback_key,
+            )
+
+            output, feedback_token = await asyncio.gather(invoke_coro, feedback_coro)
+        else:
+            feedback_key = None
+            output = await invoke_coro
+            feedback_token = None
 
         if self._include_callback_events:
             callback_events = [
@@ -742,8 +847,17 @@ class APIHandler:
                 # Callbacks are scrubbed and exceptions are converted to
                 # serializable format before returned in the response.
                 callback_events=callback_events,
-                metadata=SingletonResponseMetadata(
-                    run_id=_get_base_run_id_as_str(event_aggregator)
+                metadata=InvokeResponseMetadata(
+                    run_id=run_id,
+                    feedback_tokens=[
+                        FeedbackToken(
+                            key=feedback_key,
+                            token_url=feedback_token.url,
+                            expires_at=feedback_token.expires_at.isoformat(),
+                        )
+                    ]
+                    if feedback_token
+                    else [],
                 ),
             ),
         )
@@ -839,7 +953,31 @@ class APIHandler:
                 )
             )
 
-        output = await self._runnable.abatch(inputs, config=final_configs)
+        run_ids = [config["run_id"] for config in final_configs]
+
+        batch_coro = self._runnable.abatch(inputs, config=final_configs)
+
+        feedback_key: Optional[str]
+
+        # If there's feedback enabled, let's create a presigned feedback token
+        if self._token_feedback_enabled:
+            feedback_key = self._token_feedback_config["key_configs"][0]["key"]
+            feedback_coros = [
+                run_in_executor(
+                    None,
+                    self._langsmith_client.create_presigned_feedback_token,
+                    run_id,
+                    feedback_key,
+                )
+                for run_id in run_ids
+            ]
+            response = await asyncio.gather(batch_coro, *feedback_coros)
+            output = response[0]
+            feedback_tokens = response[1:]
+        else:
+            feedback_key = None
+            output = await batch_coro
+            feedback_tokens = []
 
         if self._include_callback_events:
             callback_events = [
@@ -854,13 +992,35 @@ class APIHandler:
         else:
             callback_events = []
 
+        if feedback_tokens:
+            metadatas = [
+                InvokeResponseMetadata(
+                    run_id=run_id,
+                    feedback_tokens=[
+                        FeedbackToken(
+                            key=feedback_key,
+                            token_url=feedback_token.url,
+                            expires_at=feedback_token.expires_at.isoformat(),
+                        )
+                    ],
+                )
+                for run_id, feedback_token in zip(run_ids, feedback_tokens)
+            ]
+        else:
+            metadatas = [
+                InvokeResponseMetadata(run_id=run_id, feedback_tokens=[])
+                for run_id in run_ids
+            ]
+
         obj = self._BatchResponse(
             output=self._serializer.dumpd(output),
             callback_events=callback_events,
             metadata=BatchResponseMetadata(
-                run_ids=[_get_base_run_id_as_str(agg) for agg in aggregators]
+                run_ids=run_ids,
+                responses=metadatas,
             ),
         )
+
         return _json_encode_response(obj)
 
     async def stream(
@@ -921,8 +1081,7 @@ class APIHandler:
                 Originates from the client side. This config must be validated.
             server_config: optional server configuration that will be merged
         """
-        err_event = {}
-        validation_exception: Optional[BaseException] = None
+        run_id = None
         try:
             config, input_ = await self._get_config_and_input(
                 request,
@@ -930,36 +1089,30 @@ class APIHandler:
                 endpoint="stream",
                 server_config=server_config,
             )
-        except BaseException as e:
-            validation_exception = e
-            if isinstance(e, RequestValidationError):
-                err_event = {
-                    "event": "error",
-                    "data": json.dumps(
-                        {"status_code": 422, "message": repr(e.errors())}
-                    ),
-                }
-            else:
-                err_event = {
-                    "event": "error",
-                    # Do not expose the error message to the client since
-                    # the message may contain sensitive information.
-                    "data": json.dumps(
-                        {"status_code": 500, "message": "Internal Server Error"}
-                    ),
-                }
+            run_id = config["run_id"]
+        except BaseException:
+            # Exceptions will be properly translated by default FastAPI middleware
+            # to either 422 (on input validation) or 500 internal server errors.
+            raise
+
+        if self._token_feedback_enabled:
+            # Create task to create a presigned feedback token
+            feedback_key: Optional[str] = self._token_feedback_config["key_configs"][0][
+                "key"
+            ]
+            feedback_coro = run_in_executor(
+                None,
+                self._langsmith_client.create_presigned_feedback_token,
+                run_id,
+                feedback_key,
+            )
+            task: Optional[asyncio.Task] = asyncio.create_task(feedback_coro)
+        else:
+            feedback_key = None
+            task = None
 
         async def _stream() -> AsyncIterator[dict]:
             """Stream the output of the runnable."""
-            if validation_exception:
-                yield err_event
-                if isinstance(validation_exception, RequestValidationError):
-                    return
-                else:
-                    raise AssertionError(
-                        "Internal server error"
-                    ) from validation_exception
-
             try:
                 config_w_callbacks = config.copy()
                 event_aggregator = AsyncEventAggregatorCallback()
@@ -969,16 +1122,19 @@ class APIHandler:
                     input_,
                     config=config_w_callbacks,
                 ):
-                    if not has_sent_metadata and event_aggregator.callback_events:
-                        yield {
-                            "event": "metadata",
-                            "data": json.dumps(
-                                {
-                                    "run_id": _get_base_run_id_as_str(event_aggregator),
-                                }
-                            ),
-                        }
+                    # Send a metadata event as soon as possible
+                    if not has_sent_metadata:
+                        if task is not None and not task.done():
+                            continue
+                        if task is None:
+                            feedback_token = None
+                        else:
+                            feedback_token = task.result()
+
                         has_sent_metadata = True
+                        yield _create_metadata_event(
+                            run_id, feedback_key, feedback_token
+                        )
 
                     yield {
                         # EventSourceResponse expects a string for data
@@ -1014,8 +1170,6 @@ class APIHandler:
         View documentation for endpoint at the end of the file.
         It's attached to _stream_log_docs endpoint.
         """
-        err_event = {}
-        validation_exception: Optional[BaseException] = None
         try:
             config, input_ = await self._get_config_and_input(
                 request,
@@ -1023,56 +1177,39 @@ class APIHandler:
                 endpoint="stream_log",
                 server_config=server_config,
             )
-        except BaseException as e:
-            validation_exception = e
-            if isinstance(e, RequestValidationError):
-                err_event = {
-                    "event": "error",
-                    "data": json.dumps(
-                        {"status_code": 422, "message": repr(e.errors())}
-                    ),
-                }
-            else:
-                err_event = {
-                    "event": "error",
-                    # Do not expose the error message to the client since
-                    # the message may contain sensitive information.
-                    "data": json.dumps(
-                        {"status_code": 500, "message": "Internal Server Error"}
-                    ),
-                }
-
+            run_id = config["run_id"]
+        except BaseException:
+            # Exceptions will be properly translated by default FastAPI middleware
+            # to either 422 (on input validation) or 500 internal server errors.
+            raise
         try:
             body = await request.json()
             with _with_validation_error_translation():
                 stream_log_request = StreamLogParameters(**body)
         except json.JSONDecodeError:
-            # Body as text
-            validation_exception = RequestValidationError(errors=["Invalid JSON body"])
-            err_event = {
-                "event": "error",
-                "data": json.dumps(
-                    {"status_code": 422, "message": "Invalid JSON body"}
-                ),
-            }
-        except RequestValidationError as e:
-            validation_exception = e
-            err_event = {
-                "event": "error",
-                "data": json.dumps({"status_code": 422, "message": repr(e.errors())}),
-            }
+            raise RequestValidationError(errors=["Invalid JSON body"])
+        except RequestValidationError:
+            raise
+
+        feedback_key: Optional[str]
+
+        if self._token_feedback_enabled:
+            # Create task to create a presigned feedback token
+            feedback_key: str = self._token_feedback_config["key_configs"][0]["key"]
+            feedback_coro = run_in_executor(
+                None,
+                self._langsmith_client.create_presigned_feedback_token,
+                run_id,
+                feedback_key,
+            )
+            task: Optional[asyncio.Task] = asyncio.create_task(feedback_coro)
+        else:
+            feedback_key = None
+            task = None
 
         async def _stream_log() -> AsyncIterator[dict]:
             """Stream the output of the runnable."""
-            if validation_exception:
-                yield err_event
-                if isinstance(validation_exception, RequestValidationError):
-                    return
-                else:
-                    raise AssertionError(
-                        "Internal server error"
-                    ) from validation_exception
-
+            has_sent_metadata = False
             try:
                 async for chunk in self._runnable.astream_log(
                     input_,
@@ -1106,6 +1243,18 @@ class APIHandler:
                             "data": self._serializer.dumps(data).decode("utf-8"),
                             "event": "data",
                         }
+
+                    # Send a metadata event as soon as possible
+                    if not has_sent_metadata and self._token_feedback_enabled:
+                        if task is None:
+                            raise AssertionError("Feedback token task was not created.")
+                        if not task.done():
+                            continue
+                        feedback_token = task.result()
+                        yield _create_metadata_event(
+                            run_id, feedback_key, feedback_token
+                        )
+                        has_sent_metadata = True
                 yield {"event": "end"}
             except BaseException:
                 yield {
@@ -1129,8 +1278,7 @@ class APIHandler:
         server_config: Optional[RunnableConfig] = None,
     ) -> EventSourceResponse:
         """Stream events from the runnable."""
-        err_event = {}
-        validation_exception: Optional[BaseException] = None
+        run_id = None
         try:
             config, input_ = await self._get_config_and_input(
                 request,
@@ -1138,44 +1286,36 @@ class APIHandler:
                 endpoint="stream_events",
                 server_config=server_config,
             )
-        except BaseException as e:
-            validation_exception = e
-            if isinstance(e, RequestValidationError):
-                err_event = {
-                    "event": "error",
-                    "data": json.dumps(
-                        {"status_code": 422, "message": repr(e.errors())}
-                    ),
-                }
-            else:
-                err_event = {
-                    "event": "error",
-                    # Do not expose the error message to the client since
-                    # the message may contain sensitive information.
-                    "data": json.dumps(
-                        {"status_code": 500, "message": "Internal Server Error"}
-                    ),
-                }
+            run_id = config["run_id"]
+        except BaseException:
+            # Exceptions will be properly translated by default FastAPI middleware
+            # to either 422 (on input validation) or 500 internal server errors.
+            raise
 
         try:
             body = await request.json()
             with _with_validation_error_translation():
                 stream_events_request = StreamEventsParameters(**body)
         except json.JSONDecodeError:
-            # Body as text
-            validation_exception = RequestValidationError(errors=["Invalid JSON body"])
-            err_event = {
-                "event": "error",
-                "data": json.dumps(
-                    {"status_code": 422, "message": "Invalid JSON body"}
-                ),
-            }
-        except RequestValidationError as e:
-            validation_exception = e
-            err_event = {
-                "event": "error",
-                "data": json.dumps({"status_code": 422, "message": repr(e.errors())}),
-            }
+            raise RequestValidationError(errors=["Invalid JSON body"])
+        except RequestValidationError:
+            raise
+
+        feedback_key: Optional[str]
+
+        if self._token_feedback_enabled:
+            # Create task to create a presigned feedback token
+            feedback_key: str = self._token_feedback_config["key_configs"][0]["key"]
+            feedback_coro = run_in_executor(
+                None,
+                self._langsmith_client.create_presigned_feedback_token,
+                run_id,
+                feedback_key,
+            )
+            task: Optional[asyncio.Task] = asyncio.create_task(feedback_coro)
+        else:
+            feedback_key = None
+            task = None
 
         async def _stream_events() -> AsyncIterator[dict]:
             """Stream the output of the runnable."""
@@ -1184,14 +1324,7 @@ class APIHandler:
                     "Please upgrade langchain-core>=0.1.14 to use astream_events"
                 )
 
-            if validation_exception:
-                yield err_event
-                if isinstance(validation_exception, RequestValidationError):
-                    return
-                else:
-                    raise AssertionError(
-                        "Internal server error"
-                    ) from validation_exception
+            has_sent_metadata = False
 
             try:
                 async for event in self._runnable.astream_events(
@@ -1219,6 +1352,18 @@ class APIHandler:
                             "data": self._serializer.dumps(event).decode("utf-8"),
                             "event": "data",
                         }
+
+                    # Send a metadata event as soon as possible
+                    if not has_sent_metadata and self._token_feedback_enabled:
+                        if task is None:
+                            raise AssertionError("Feedback token task was not created.")
+                        if not task.done():
+                            continue
+                        feedback_token = task.result()
+                        yield _create_metadata_event(
+                            run_id, feedback_key, feedback_token
+                        )
+                        has_sent_metadata = True
                 yield {"event": "end"}
             except BaseException:
                 yield {
@@ -1414,6 +1559,38 @@ class APIHandler:
             score=feedback_from_langsmith.score,
             value=feedback_from_langsmith.value,
             comment=feedback_from_langsmith.comment,
+        )
+
+    async def create_feedback_from_token(
+        self, create_request: FeedbackCreateRequestTokenBased
+    ) -> None:
+        """Send feedback on an individual run to langsmith."""
+
+        if not tracing_is_enabled() or not self._token_feedback_enabled:
+            raise HTTPException(
+                400,
+                (
+                    "The feedback endpoint is only accessible when LangSmith is "
+                    "enabled on your LangServe server.\n "
+                    "Please set the proper environment variables to enable LangSmith."
+                    "In addition, please ensure that the token_feedback_config "
+                    "has been properly specified when using add_routes or APIHandler."
+                ),
+            )
+
+        metadata = create_request.metadata or {}
+        metadata.update(
+            {
+                "from_langserve": True,
+            }
+        )
+
+        self._langsmith_client.create_feedback_from_token(
+            create_request.token_or_url,
+            score=create_request.score,
+            value=create_request.value,
+            comment=create_request.comment,
+            metadata=metadata,
         )
 
     async def _check_feedback_enabled(self) -> None:

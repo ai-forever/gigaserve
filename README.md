@@ -91,7 +91,7 @@ add_routes(
 
 add_routes(
     app,
-    ChatAnthropic(),
+    ChatAnthropic(model="claude-3-haiku-20240307"),
     path="/anthropic",
 )
 
@@ -171,7 +171,7 @@ chain.batch([{ "topic": "попугаи" }, { "topic": "кошки" }])
 import { RemoteRunnable } from "@langchain/core/runnables/remote";
 
 const chain = new RemoteRunnable({
-    url: `http://localhost:8000/joke/`,
+  url: `http://localhost:8000/joke/`,
 });
 const result = await chain.invoke({
   topic: "кошки",

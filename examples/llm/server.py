@@ -2,7 +2,8 @@
 """Example LangChain server exposes multiple runnables (LLMs in this case)."""
 
 from fastapi import FastAPI
-from langchain.chat_models import ChatAnthropic, ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
 from langserve import add_routes
 
@@ -14,12 +15,12 @@ app = FastAPI(
 
 add_routes(
     app,
-    ChatOpenAI(),
+    ChatOpenAI(model="gpt-3.5-turbo-0125"),
     path="/openai",
 )
 add_routes(
     app,
-    ChatAnthropic(),
+    ChatAnthropic(model="claude-3-haiku-20240307"),
     path="/anthropic",
 )
 

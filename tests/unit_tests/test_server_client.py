@@ -2,6 +2,7 @@
 import asyncio
 import datetime
 import json
+import uuid
 from asyncio import AbstractEventLoop
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from enum import Enum
 from itertools import cycle
 from typing import (
     Any,
+    AsyncIterator,
     Dict,
     Iterable,
     Iterator,
@@ -26,21 +28,36 @@ import pytest_asyncio
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
-from langchain.callbacks.tracers.log_stream import RunLog, RunLogPatch
-from langchain.prompts import PromptTemplate
-from langchain.prompts.base import StringPromptValue
-from langchain.schema.messages import HumanMessage, SystemMessage
-from langchain.schema.runnable import Runnable, RunnableConfig, RunnablePassthrough
-from langchain.schema.runnable.base import RunnableLambda
-from langchain.schema.runnable.utils import ConfigurableField, Input, Output
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.outputs import ChatGenerationChunk, LLMResult
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompt_values import StringPromptValue
+from langchain_core.prompts import (
+    ChatPromptTemplate,
+    MessagesPlaceholder,
+    PromptTemplate,
+)
+from langchain_core.runnables import (
+    ConfigurableField,
+    Runnable,
+    RunnableConfig,
+    RunnableLambda,
+    RunnablePassthrough,
+)
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables.utils import Input, Output
+from langchain_core.tracers import RunLog, RunLogPatch
 from langsmith import schemas as ls_schemas
+from langsmith.client import Client
+from langsmith.schemas import FeedbackIngestToken
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 from typing_extensions import Annotated, TypedDict
@@ -54,6 +71,7 @@ from langserve.callbacks import AsyncEventAggregatorCallback
 from langserve.client import RemoteRunnable
 from langserve.lzstring import LZString
 from langserve.schema import CustomUserType
+from tests.unit_tests.utils.stubs import AnyStr
 
 try:
     from pydantic.v1 import BaseModel, Field
@@ -276,73 +294,6 @@ def test_server(app: FastAPI) -> None:
     # assert response.text == "event: data\r\ndata: 2\r\n\r\nevent: end\r\n\r\n"
 
 
-def test_serve_playground(app: FastAPI) -> None:
-    """Test the server directly via HTTP requests."""
-    sync_client = TestClient(app=app)
-    response = sync_client.get("/playground/index.html")
-    assert response.status_code == 200
-    response = sync_client.get("/playground/i_do_not_exist.txt")
-    assert response.status_code == 404
-    response = sync_client.get("/playground//etc/passwd")
-    assert response.status_code == 404
-
-
-async def test_serve_playground_with_api_router() -> None:
-    """Test serving playground from an api router with a prefix."""
-    app = FastAPI()
-
-    # Make sure that we can add routers
-    # to an API router
-    router = APIRouter(prefix="/langserve_runnables")
-
-    add_routes(
-        router,
-        RunnableLambda(lambda foo: "hello"),
-        path="/chat",
-    )
-
-    app.include_router(router)
-    async_client = AsyncClient(app=app, base_url="http://localhost:9999")
-    response = await async_client.get("/langserve_runnables/chat/playground/index.html")
-    assert response.status_code == 200
-
-
-async def test_root_path_on_playground(event_loop: AbstractEventLoop) -> None:
-    """Test that the playground respects the root_path for requesting assets"""
-
-    for root_path in ("/home/root", "/home/root/"):
-        app = FastAPI(root_path=root_path)
-        add_routes(
-            app,
-            RunnableLambda(lambda foo: "hello"),
-            path="/chat",
-        )
-
-        router = APIRouter(prefix="/router")
-        add_routes(
-            router,
-            RunnableLambda(lambda foo: "hello"),
-            path="/chat",
-        )
-        app.include_router(router)
-
-        async_client = AsyncClient(app=app, base_url="http://localhost:9999")
-
-        response = await async_client.get("/chat/playground/index.html")
-        assert response.status_code == 200
-        assert (
-            f'src="{root_path.rstrip("/")}/chat/playground/assets/'
-            in response.content.decode()
-        ), "html should contain reference to playground assets with root_path prefix"
-
-        response = await async_client.get("/router/chat/playground/index.html")
-        assert response.status_code == 200
-        assert (
-            f'src="{root_path.rstrip("/")}/router/chat/playground/assets/'
-            in response.content.decode()
-        ), "html should contain reference to playground assets with root_path prefix"
-
-
 async def test_server_async(app: FastAPI) -> None:
     """Test the server directly via HTTP requests."""
     async with get_async_test_client(app, raise_app_exceptions=True) as async_client:
@@ -430,26 +381,18 @@ async def test_server_async(app: FastAPI) -> None:
     async with get_async_test_client(app, raise_app_exceptions=True) as async_client:
         # Test bad stream requests
         response = await async_client.post("/stream", data="bad json []")
-        stream_events = _decode_eventstream(response.text)
-        assert stream_events[0]["type"] == "error"
-        assert stream_events[0]["data"]["status_code"] == 422
+        assert response.status_code == 422
 
         response = await async_client.post("/stream", json={})
-        stream_events = _decode_eventstream(response.text)
-        assert stream_events[0]["type"] == "error"
-        assert stream_events[0]["data"]["status_code"] == 422
+        assert response.status_code == 422
 
     # test stream_log bad requests
     async with get_async_test_client(app, raise_app_exceptions=True) as async_client:
         response = await async_client.post("/stream_log", data="bad json []")
-        stream_events = _decode_eventstream(response.text)
-        assert stream_events[0]["type"] == "error"
-        assert stream_events[0]["data"]["status_code"] == 422
+        assert response.status_code == 422
 
         response = await async_client.post("/stream_log", json={})
-        stream_events = _decode_eventstream(response.text)
-        assert stream_events[0]["type"] == "error"
-        assert stream_events[0]["data"]["status_code"] == 422
+        assert response.status_code == 422
 
 
 async def test_server_astream_events(app: FastAPI) -> None:
@@ -505,14 +448,10 @@ async def test_server_astream_events(app: FastAPI) -> None:
     # test stream_events with bad requests
     async with get_async_test_client(app, raise_app_exceptions=True) as async_client:
         response = await async_client.post("/stream_events", data="bad json []")
-        stream_events = _decode_eventstream(response.text)
-        assert stream_events[0]["type"] == "error"
-        assert stream_events[0]["data"]["status_code"] == 422
+        assert response.status_code == 422
 
         response = await async_client.post("/stream_events", json={})
-        stream_events = _decode_eventstream(response.text)
-        assert stream_events[0]["type"] == "error"
-        assert stream_events[0]["data"]["status_code"] == 422
+        assert response.status_code == 422
 
 
 async def test_server_bound_async(app_for_config: FastAPI) -> None:
@@ -861,6 +800,31 @@ async def test_astream_log(async_remote_runnable: RemoteRunnable) -> None:
             "type": "chain",
             "name": "add_one",
         }
+
+
+async def test_streaming_with_errors() -> None:
+    from langchain_core.runnables import RunnableGenerator
+
+    async def with_errors(inputs: dict) -> AsyncIterator[int]:
+        yield 1
+        raise ValueError("Error")
+        yield 2
+
+    app = FastAPI()
+    add_routes(app, RunnableGenerator(with_errors), path="/with_errors")
+
+    async with get_async_remote_runnable(
+        app, path="/with_errors", raise_app_exceptions=False
+    ) as runnable:
+        chunks = []
+
+        with pytest.raises(httpx.HTTPStatusError) as e:
+            async for chunk in runnable.astream(1):
+                chunks.append(chunk)
+
+        # Check that first chunk was received
+        assert chunks == [1]
+        assert e.value.response.status_code == 500
 
 
 async def test_astream_log_allowlist(event_loop: AbstractEventLoop) -> None:
@@ -2008,10 +1972,14 @@ async def test_per_request_config_modifier_endpoints(
             else:
                 raise ValueError(f"Unknown endpoint {endpoint}")
 
-            if endpoint in {"invoke", "batch"}:
+            if endpoint in {
+                "invoke",
+                "batch",
+                "stream",
+                "stream_log",
+                "astream_events",
+            }:
                 assert response.status_code == 500
-            elif endpoint in {"stream", "stream_log"}:
-                assert '"status_code": 500' in response.text
             else:
                 assert response.status_code != 500
 
@@ -2112,6 +2080,7 @@ async def test_endpoint_configurations() -> None:
         ("GET", "/playground/index.html", {}),
         ("HEAD", "/feedback", {}),
         ("GET", "/feedback", {}),
+        ("POST", "/token_feedback", {}),
         # Check config hashes
         ("POST", "/c/1234/invoke", {"input": 1}),
         ("POST", "/c/1234/batch", {"inputs": [1, 2]}),
@@ -2590,6 +2559,12 @@ async def test_astream_events_with_prompt_model_parser_chain(
                 "tags": ["seq:step:2"],
             },
             {
+                "data": {"chunk": AIMessageChunk(content="Hello", id=AnyStr())},
+                "event": "on_chat_model_stream",
+                "name": "GenericFakeChatModel",
+                "tags": ["seq:step:2"],
+            },
+            {
                 "data": {},
                 "event": "on_parser_start",
                 "name": "StrOutputParser",
@@ -2608,7 +2583,7 @@ async def test_astream_events_with_prompt_model_parser_chain(
                 "tags": [],
             },
             {
-                "data": {"chunk": AIMessageChunk(content="Hello")},
+                "data": {"chunk": AIMessageChunk(content=" ", id=AnyStr())},
                 "event": "on_chat_model_stream",
                 "name": "GenericFakeChatModel",
                 "tags": ["seq:step:2"],
@@ -2626,7 +2601,7 @@ async def test_astream_events_with_prompt_model_parser_chain(
                 "tags": [],
             },
             {
-                "data": {"chunk": AIMessageChunk(content=" ")},
+                "data": {"chunk": AIMessageChunk(content="World!", id=AnyStr())},
                 "event": "on_chat_model_stream",
                 "name": "GenericFakeChatModel",
                 "tags": ["seq:step:2"],
@@ -2642,12 +2617,6 @@ async def test_astream_events_with_prompt_model_parser_chain(
                 "event": "on_chain_stream",
                 "name": "RunnableSequence",
                 "tags": [],
-            },
-            {
-                "data": {"chunk": AIMessageChunk(content="World!")},
-                "event": "on_chat_model_stream",
-                "name": "GenericFakeChatModel",
-                "tags": ["seq:step:2"],
             },
             {
                 "data": {
@@ -2664,7 +2633,9 @@ async def test_astream_events_with_prompt_model_parser_chain(
                             [
                                 ChatGenerationChunk(
                                     text="Hello World!",
-                                    message=AIMessageChunk(content="Hello World!"),
+                                    message=AIMessageChunk(
+                                        content="Hello World!", id=AnyStr()
+                                    ),
                                 )
                             ]
                         ],
@@ -2678,7 +2649,7 @@ async def test_astream_events_with_prompt_model_parser_chain(
             },
             {
                 "data": {
-                    "input": AIMessageChunk(content="Hello World!"),
+                    "input": AIMessageChunk(content="Hello World!", id=AnyStr()),
                     "output": "Hello World!",
                 },
                 "event": "on_parser_end",
@@ -2816,9 +2787,294 @@ async def test_remote_configurable_remote_runnable() -> None:
         result = await chain_with_history.ainvoke(
             {"question": "hi"}, {"configurable": {"session_id": "1"}}
         )
-        assert result == AIMessage(content="Hello World!")
+        assert result == AIMessage(content="Hello World!", id=AnyStr())
         assert store == {
             "1": InMemoryHistory(
-                messages=[HumanMessage(content="hi"), AIMessage(content="Hello World!")]
+                messages=[
+                    HumanMessage(content="hi"),
+                    AIMessage(content="Hello World!", id=AnyStr()),
+                ]
             )
         }
+
+
+@asynccontextmanager
+async def get_langsmith_client() -> AsyncIterator[MagicMock]:
+    """Get a patched langsmith client."""
+    with patch("langserve.api_handler.ls_client") as mocked_ls_client_package:
+        with patch("langserve.api_handler.tracing_is_enabled") as tracing_is_enabled:
+            tracing_is_enabled.return_value = True
+            mocked_client = MagicMock(auto_spec=Client)
+            mocked_ls_client_package.Client.return_value = mocked_client
+            yield mocked_client
+
+
+async def test_token_feedback_included_in_responses() -> None:
+    """Test that information to leave scoped feedback is passed to the client
+    is present in the server response.
+    """
+    feedback_id = uuid.UUID(int=1)
+    async with get_langsmith_client() as mocked_client:
+        mocked_client.create_presigned_feedback_token.return_value = (
+            FeedbackIngestToken(
+                id=feedback_id,
+                url="feedback_id",
+                expires_at=datetime.datetime(2023, 1, 1),
+            )
+        )
+
+        local_app = FastAPI()
+        add_routes(
+            local_app,
+            RunnableLambda(lambda foo: "hello"),
+            enable_feedback_endpoint=True,
+            token_feedback_config={
+                "key_configs": [
+                    {
+                        "key": "foo",
+                    }
+                ]
+            },
+        )
+
+        async with get_async_test_client(
+            local_app, raise_app_exceptions=True
+        ) as async_client:
+            response = await async_client.post(
+                "/invoke",
+                json={"input": "hello"},
+            )
+
+            json_response = response.json()
+            run_id = json_response["metadata"]["run_id"]
+            assert json_response == {
+                "metadata": {
+                    "feedback_tokens": [
+                        {
+                            "expires_at": "2023-01-01T00:00:00",
+                            "key": "foo",
+                            "token_url": "feedback_id",
+                        }
+                    ],
+                    "run_id": run_id,
+                },
+                "output": "hello",
+            }
+
+            response = await async_client.post(
+                "/batch",
+                json={
+                    "inputs": ["hello", "world"],
+                },
+            )
+            json_response = response.json()
+            responses = json_response["metadata"]["responses"]
+            run_ids = [response["run_id"] for response in responses]
+            assert run_ids == json_response["metadata"]["run_ids"]
+
+            for r in responses:
+                del r["run_id"]
+
+            assert json_response == {
+                "metadata": {
+                    "responses": [
+                        {
+                            "feedback_tokens": [
+                                {
+                                    "expires_at": "2023-01-01T00:00:00",
+                                    "key": "foo",
+                                    "token_url": "feedback_id",
+                                }
+                            ]
+                        },
+                        {
+                            "feedback_tokens": [
+                                {
+                                    "expires_at": "2023-01-01T00:00:00",
+                                    "key": "foo",
+                                    "token_url": "feedback_id",
+                                }
+                            ]
+                        },
+                    ],
+                    "run_ids": run_ids,
+                },
+                "output": ["hello", "hello"],
+            }
+
+            # Test stream
+            response = await async_client.post(
+                "/stream",
+                json={"input": "hello"},
+            )
+            events = _decode_eventstream(response.text)
+            del events[0]["data"]["run_id"]
+            assert events == [
+                {
+                    "data": {
+                        "feedback_tokens": [
+                            {
+                                "expires_at": "2023-01-01T00:00:00",
+                                "key": "foo",
+                                "token_url": "feedback_id",
+                            }
+                        ]
+                    },
+                    "type": "metadata",
+                },
+                {"data": "hello", "type": "data"},
+                {"type": "end"},
+            ]
+
+            # Test astream events
+            response = await async_client.post(
+                "/stream_events",
+                json={"input": "hello"},
+            )
+            events = _decode_eventstream(response.text)
+            for event in events:
+                if "data" in event and "run_id" in event["data"]:
+                    del event["data"]["run_id"]
+
+            # Find the metadata event and pull it out
+            metadata_event = None
+            for event in events:
+                if event["type"] == "metadata":
+                    metadata_event = event
+
+            assert metadata_event == {
+                "data": {
+                    "feedback_tokens": [
+                        {
+                            "expires_at": "2023-01-01T00:00:00",
+                            "key": "foo",
+                            "token_url": "feedback_id",
+                        }
+                    ]
+                },
+                "type": "metadata",
+            }
+
+            # Test astream log
+            response = await async_client.post(
+                "/stream_log",
+                json={"input": "hello"},
+            )
+            events = _decode_eventstream(response.text)
+            for event in events:
+                if "data" in event and "run_id" in event["data"]:
+                    del event["data"]["run_id"]
+
+            # Find the metadata event and pull it out
+            metadata_event = None
+            for event in events:
+                if event["type"] == "metadata":
+                    metadata_event = event
+
+            assert metadata_event == {
+                "data": {
+                    "feedback_tokens": [
+                        {
+                            "expires_at": "2023-01-01T00:00:00",
+                            "key": "foo",
+                            "token_url": "feedback_id",
+                        }
+                    ]
+                },
+                "type": "metadata",
+            }
+
+
+async def test_passing_run_id_from_client() -> None:
+    """test that the client can set a run id if server allows it."""
+    local_app = FastAPI()
+    add_routes(
+        local_app,
+        RunnableLambda(lambda foo: "hello"),
+        config_keys=["run_id"],
+    )
+
+    run_id = uuid.UUID(int=9)
+    run_id2 = uuid.UUID(int=14)
+
+    async with get_async_test_client(
+        local_app, raise_app_exceptions=True
+    ) as async_client:
+        response = await async_client.post(
+            "/invoke",
+            json={"input": "hello", "config": {"run_id": str(run_id)}},
+        )
+        response.raise_for_status()
+        json_response = response.json()
+        assert json_response["metadata"]["run_id"] == str(run_id)
+
+        ## Test batch
+        response = await async_client.post(
+            "/batch",
+            json={
+                "inputs": ["hello", "world"],
+                "config": [{"run_id": str(run_id)}, {"run_id": str(run_id2)}],
+            },
+        )
+        json_response = response.json()
+        responses = json_response["metadata"]["responses"]
+        run_ids = [response["run_id"] for response in responses]
+        assert run_ids == [str(run_id), str(run_id2)]
+
+        # Test stream
+        response = await async_client.post(
+            "/stream",
+            json={"input": "hello", "config": {"run_id": str(run_id)}},
+        )
+        events = _decode_eventstream(response.text)
+        assert events[0]["data"]["run_id"] == str(run_id)
+
+        # Test stream events
+        response = await async_client.post(
+            "/stream_events",
+            json={"input": "hello", "config": {"run_id": str(run_id)}},
+        )
+        events = _decode_eventstream(response.text)
+        assert events[0]["data"]["run_id"] == str(run_id)
+
+
+async def test_passing_bad_runnable_to_add_routes() -> None:
+    """test passing a bad type."""
+    with pytest.raises(TypeError) as e:
+        add_routes(FastAPI(), "not a runnable")
+
+    assert e.match("Expected a Runnable, got <class 'str'>")
+
+
+async def test_token_feedback_endpoint() -> None:
+    """Tests that the feedback endpoint can accept feedback to langsmith."""
+    async with get_langsmith_client() as client:
+        local_app = FastAPI()
+        add_routes(
+            local_app,
+            RunnableLambda(lambda foo: "hello"),
+            token_feedback_config={
+                "key_configs": [
+                    {
+                        "key": "silliness",
+                    }
+                ]
+            },
+        )
+
+        async with get_async_test_client(
+            local_app, raise_app_exceptions=True
+        ) as async_client:
+            response = await async_client.post(
+                "/token_feedback", json={"token_or_url": "some_url", "score": 3}
+            )
+            assert response.status_code == 200
+
+            call = client.create_feedback_from_token.call_args
+            assert call.args[0] == "some_url"
+            assert call.kwargs == {
+                "comment": None,
+                "metadata": {"from_langserve": True},
+                "score": 3,
+                "value": None,
+            }
