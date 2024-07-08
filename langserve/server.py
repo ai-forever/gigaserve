@@ -6,24 +6,18 @@ The main entry point is the `add_routes` function which adds the routes to an ex
 FastAPI app or APIRouter.
 """
 import weakref
-from typing import (
-    Any,
-    Literal,
-    Optional,
-    Sequence,
-    Type,
-    Union,
-)
+from typing import Any, Literal, Optional, Sequence, Type, Union
 
-from langchain.schema.runnable import Runnable
+from langchain_core.runnables import Runnable
 from typing_extensions import Annotated
 
-from langserve.api_handler import APIHandler, PerRequestConfigModifier, _is_hosted
-from langserve.pydantic_v1 import (
-    _PYDANTIC_MAJOR_VERSION,
-    PYDANTIC_VERSION,
-    BaseModel,
+from langserve.api_handler import (
+    APIHandler,
+    PerRequestConfigModifier,
+    TokenFeedbackConfig,
+    _is_hosted,
 )
+from langserve.pydantic_v1 import _PYDANTIC_MAJOR_VERSION, PYDANTIC_VERSION, BaseModel
 
 try:
     from fastapi import APIRouter, Depends, FastAPI, Request, Response
@@ -39,69 +33,13 @@ except ImportError:
 # Duplicated model names break fastapi's openapi generation.
 
 _APP_SEEN = weakref.WeakSet()
+
+# Keeps track of the paths that have been associated with each app.
+# Each runnable registered with an APP will have a unique path.
+# An APP can have multiple runnables registered with it.
+# There are multiple APPs as it's common to use APIRouter in larger
+# FastAPI applications.
 _APP_TO_PATHS = weakref.WeakKeyDictionary()
-
-
-def _setup_global_app_handlers(app: Union[FastAPI, APIRouter]) -> None:
-    @app.on_event("startup")
-    async def startup_event():
-        GIGASERVE = r"""
-  _______  __    _______      ___           _______. _______ .______     ____    ____  _______ 
- /  _____||  |  /  _____|    /   \         /       ||   ____||   _  \    \   \  /   / |   ____|
-|  |  __  |  | |  |  __     /  ^  \       |   (----`|  |__   |  |_)  |    \   \/   /  |  |__   
-|  | |_ | |  | |  | |_ |   /  /_\  \       \   \    |   __|  |      /      \      /   |   __|  
-|  |__| | |  | |  |__| |  /  _____  \  .----)   |   |  |____ |  |\  \----.  \    /    |  |____ 
- \______| |__|  \______| /__/     \__\ |_______/    |_______|| _| `._____|   \__/     |_______|
-"""  # noqa: E501
-
-        def green(text: str) -> str:
-            """Return the given text in green."""
-            return "\x1b[1;32;40m" + text + "\x1b[0m"
-
-        def orange(text: str) -> str:
-            """Return the given text in orange."""
-            return "\x1b[1;31;40m" + text + "\x1b[0m"
-
-        paths = _APP_TO_PATHS[app]
-        print(GIGASERVE)
-        for path in paths:
-            print(
-                f'{green("GIGASERVE:")} Playground for chain "{path or ""}/" is '
-                f'live at:'
-            )
-            print(f'{green("GIGASERVE:")}  │')
-            print(f'{green("GIGASERVE:")}  └──> {path}/playground/')
-            print(f'{green("GIGASERVE:")}')
-        print(f'{green("GIGASERVE:")} See all available routes at {app.docs_url}/')
-
-        if _PYDANTIC_MAJOR_VERSION == 2:
-            print()
-            print(f'{orange("GIGASERVE:")} ', end="")
-            print(
-                f"⚠️ Using pydantic {PYDANTIC_VERSION}. "
-                f"OpenAPI docs for invoke, batch, stream, stream_log "
-                f"endpoints will not be generated. API endpoints and playground "
-                f"should work as expected. "
-                f"If you need to see the docs, you can downgrade to pydantic 1. "
-                "For example, `pip install pydantic==1.10.13`. "
-                f"See https://github.com/tiangolo/fastapi/issues/10360 for details."
-            )
-        print()
-
-
-def _register_path_for_app(app: Union[FastAPI, APIRouter], path: str) -> None:
-    """Register a path when its added to app. Raise if path already seen."""
-    if app in _APP_TO_PATHS:
-        seen_paths = _APP_TO_PATHS.get(app)
-        if path in seen_paths:
-            raise ValueError(
-                f"A runnable already exists at path: {path}. If adding "
-                f"multiple runnables make sure they have different paths."
-            )
-        seen_paths.add(path)
-    else:
-        _setup_global_app_handlers(app)
-        _APP_TO_PATHS[app] = {path}
 
 
 # This is the type annotation
@@ -130,6 +68,7 @@ KNOWN_ENDPOINTS = {
     "stream_events",
     "playground",
     "feedback",
+    "token_feedback",
     "public_trace_link",
     "input_schema",
     "config_schema",
@@ -181,6 +120,7 @@ class _EndpointConfiguration:
                 is_output_schema_enabled = True
                 is_config_schema_enabled = True
                 is_config_hash_enabled = True
+                is_token_feedback_enabled = True
             else:
                 disabled_endpoints_ = set(name.lower() for name in disabled_endpoints)
                 if disabled_endpoints_ - KNOWN_ENDPOINTS:
@@ -198,6 +138,7 @@ class _EndpointConfiguration:
                 is_output_schema_enabled = "output_schema" not in disabled_endpoints_
                 is_config_schema_enabled = "config_schema" not in disabled_endpoints_
                 is_config_hash_enabled = "config_hashes" not in disabled_endpoints_
+                is_token_feedback_enabled = "token_feedback" not in disabled_endpoints_
         else:
             enabled_endpoints_ = set(name.lower() for name in enabled_endpoints)
             if enabled_endpoints_ - KNOWN_ENDPOINTS:
@@ -214,6 +155,7 @@ class _EndpointConfiguration:
             is_output_schema_enabled = "output_schema" in enabled_endpoints_
             is_config_schema_enabled = "config_schema" in enabled_endpoints_
             is_config_hash_enabled = "config_hashes" in enabled_endpoints_
+            is_token_feedback_enabled = "token_feedback" in enabled_endpoints_
 
         self.is_invoke_enabled = is_invoke_enabled
         self.is_batch_enabled = is_batch_enabled
@@ -227,6 +169,76 @@ class _EndpointConfiguration:
         self.is_config_hash_enabled = is_config_hash_enabled
         self.is_feedback_enabled = enable_feedback_endpoint
         self.is_public_trace_link_enabled = enable_public_trace_link_endpoint
+        self.is_token_feedback_enabled = is_token_feedback_enabled
+
+
+def _register_path_for_app(
+    app: Union[FastAPI, APIRouter],
+    path: str,
+    endpoint_configuration: _EndpointConfiguration,
+) -> None:
+    """Register a path when its added to app. Raise if path already seen."""
+    if app in _APP_TO_PATHS:
+        seen_paths = _APP_TO_PATHS.get(app)
+        if path in seen_paths:
+            raise ValueError(
+                f"A runnable already exists at path: {path}. If adding "
+                f"multiple runnables make sure they have different paths."
+            )
+        seen_paths.add(path)
+    else:
+        _setup_global_app_handlers(app, endpoint_configuration)
+        _APP_TO_PATHS[app] = {path}
+
+
+def _setup_global_app_handlers(
+    app: Union[FastAPI, APIRouter], endpoint_configuration: _EndpointConfiguration
+) -> None:
+    @app.on_event("startup")
+    async def startup_event():
+        GIGASERVE = r"""
+  _______  __    _______      ___           _______. _______ .______     ____    ____  _______ 
+ /  _____||  |  /  _____|    /   \         /       ||   ____||   _  \    \   \  /   / |   ____|
+|  |  __  |  | |  |  __     /  ^  \       |   (----`|  |__   |  |_)  |    \   \/   /  |  |__   
+|  | |_ | |  | |  | |_ |   /  /_\  \       \   \    |   __|  |      /      \      /   |   __|  
+|  |__| | |  | |  |__| |  /  _____  \  .----)   |   |  |____ |  |\  \----.  \    /    |  |____ 
+ \______| |__|  \______| /__/     \__\ |_______/    |_______|| _| `._____|   \__/     |_______|
+"""  # noqa: E501
+
+        def green(text: str) -> str:
+            """Return the given text in green."""
+            return "\x1b[1;32;40m" + text + "\x1b[0m"
+
+        def orange(text: str) -> str:
+            """Return the given text in orange."""
+            return "\x1b[1;31;40m" + text + "\x1b[0m"
+
+        paths = _APP_TO_PATHS[app]
+        print(GIGASERVE)
+        for path in paths:
+            if endpoint_configuration.is_playground_enabled:
+                print(
+                    f'{green("GIGASERVE:")} Playground for chain "{path or ""}/" is '
+                    f"live at:"
+                )
+                print(f'{green("GIGASERVE:")}  │')
+                print(f'{green("GIGASERVE:")}  └──> {path}/playground/')
+                print(f'{green("GIGASERVE:")}')
+        print(f'{green("GIGASERVE:")} See all available routes at {app.docs_url}/')
+
+        if _PYDANTIC_MAJOR_VERSION == 2:
+            print()
+            print(f'{orange("GIGASERVE:")} ', end="")
+            print(
+                f"⚠️ Using pydantic {PYDANTIC_VERSION}. "
+                f"OpenAPI docs for invoke, batch, stream, stream_log "
+                f"endpoints will not be generated. API endpoints and playground "
+                f"should work as expected. "
+                f"If you need to see the docs, you can downgrade to pydantic 1. "
+                "For example, `pip install pydantic==1.10.13`. "
+                f"See https://github.com/tiangolo/fastapi/issues/10360 for details."
+            )
+        print()
 
 
 # PUBLIC API
@@ -243,6 +255,7 @@ def add_routes(
     include_callback_events: bool = False,
     per_req_config_modifier: Optional[PerRequestConfigModifier] = None,
     enable_feedback_endpoint: bool = _is_hosted(),
+    token_feedback_config: Optional[TokenFeedbackConfig] = None,
     enable_public_trace_link_endpoint: bool = False,
     disabled_endpoints: Optional[Sequence[EndpointName]] = None,
     stream_log_name_allow_list: Optional[Sequence[str]] = None,
@@ -297,6 +310,16 @@ def add_routes(
             to LangSmith. Enabled by default. If this flag is disabled or LangSmith
             tracing is not enabled for the runnable, then 400 errors will be thrown
             when accessing the feedback endpoint.
+        token_feedback_config: optional configuration for token based feedback.
+            **Attention** this is distinct from `enable_feedback_endpoint`.
+            When provided, feedback tokens will be included in the response
+            metadata that can be used to provide feedback on the run.
+            In addition, an endpoint will be created for submitting feedback
+            using the feedback tokens. This is a safer option for public facing
+            APIs as they scope the feedback to a specific run id and key
+            and include an expiration time.
+            This endpoint will be created at /token_feedback
+            **BETA**: This feature is in beta and may change in the future.
         enable_public_trace_link_endpoint: Whether to enable an endpoint for
             end-users to publicly view LangSmith traces of your chain runs.
             WARNING: THIS WILL EXPOSE THE INTERNAL STATE OF YOUR RUN AND CHAIN AS
@@ -358,6 +381,15 @@ def add_routes(
               the README in langserve for more details about constraints (e.g.,
               which message types are supported etc.)
     """  # noqa: E501
+    if not isinstance(runnable, Runnable):
+        raise TypeError(
+            f"Expected a Runnable, got {type(runnable)}. "
+            f"The second argument to add_routes should be a Runnable instance."
+            f"add_route(app, runnable, ...) is the correct usage."
+            f"Please make sure that you are using a runnable which is an instance of "
+            f"langchain_core.runnables.Runnable."
+        )
+
     endpoint_configuration = _EndpointConfiguration(
         enabled_endpoints=enabled_endpoints,
         disabled_endpoints=disabled_endpoints,
@@ -383,7 +415,7 @@ def add_routes(
     if isinstance(app, FastAPI):  # type: ignore
         # Cannot do this checking logic for a router since
         # API routers are not hashable
-        _register_path_for_app(app, path)
+        _register_path_for_app(app, path, endpoint_configuration)
 
     # Determine the base URL for the playground endpoint
     prefix = app.prefix if isinstance(app, APIRouter) else ""  # type: ignore
@@ -406,6 +438,7 @@ def add_routes(
         config_keys=config_keys,
         include_callback_events=include_callback_events,
         enable_feedback_endpoint=enable_feedback_endpoint,
+        token_feedback_config=token_feedback_config,
         enable_public_trace_link_endpoint=enable_public_trace_link_endpoint,
         per_req_config_modifier=per_req_config_modifier,
         stream_log_name_allow_list=stream_log_name_allow_list,
@@ -701,6 +734,12 @@ def add_routes(
                 dependencies=dependencies,
                 include_in_schema=False,
             )(playground)
+
+    if endpoint_configuration.is_token_feedback_enabled:
+        app.post(
+            namespace + "/token_feedback",
+            dependencies=dependencies,
+        )(api_handler.create_feedback_from_token)
 
     if enable_feedback_endpoint:
         app.post(
