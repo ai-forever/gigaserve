@@ -439,7 +439,7 @@ class FileProcessingRequest(CustomUserType):
 
 ### Виджет чата {#vidzhet-chata}
 
-Пример виджета в [репозитории](https://github.com/ai-forever/gigaserve/blob/main/examples/widgets/server.py).
+Пример виджета в [репозитории](examples/widgets/chat/tuples/server.py).
 
 Чтобы задать виджет чата передайте `"type": "chat"`:
 
